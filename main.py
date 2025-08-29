@@ -9,9 +9,6 @@ from typing import Dict, List, Optional, Tuple
 import requests
 from flask import Flask, request, jsonify
 from supabase import create_client, Client
-import smtplib
-from email.mime.text import MimeText
-from email.mime.multipart import MimeMultipart
 import logging
 from pathlib import Path
 
