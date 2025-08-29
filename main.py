@@ -107,7 +107,7 @@ class AudioProcessor:
         if speaker in ["Balasz", "Aggie"]:
             text = self.apply_pronunciation_fixes(text)
         
-        ssml = f'<speak>'
+        ssml = '<speak>'
         
         # Add voice-specific prosody
         if speaker == "NARRATOR":
@@ -282,8 +282,6 @@ class AudioProcessor:
         """Upload audio file to Supabase Storage"""
         try:
             response = supabase.storage.from_("lesson-audio").upload(file_path, audio_data, {"content-type": content_type})
-            if response.error:
-                raise Exception(f"Supabase upload error: {response.error}")
             
             # Get public URL
             public_url = supabase.storage.from_("lesson-audio").get_public_url(file_path)
@@ -291,17 +289,15 @@ class AudioProcessor:
             
         except Exception as e:
             logger.error(f"Failed to upload to Supabase: {e}")
-            raise
+            raise Exception(f"Supabase upload error: {str(e)}")
     
     def update_lesson_database(self, lesson_data: Dict) -> None:
         """Update lessons table in Supabase"""
         try:
             response = supabase.table('lessons').insert(lesson_data).execute()
-            if response.error:
-                raise Exception(f"Database update error: {response.error}")
         except Exception as e:
             logger.error(f"Failed to update lessons table: {e}")
-            raise
+            raise Exception(f"Database update error: {str(e)}")
     
     def update_vocabulary_database(self, lesson_id: str, vocabulary_data: List[Dict]) -> None:
         """Update lesson_vocabulary table in Supabase"""
@@ -310,11 +306,9 @@ class AudioProcessor:
                 vocab_item['lesson_id'] = lesson_id
             
             response = supabase.table('lesson_vocabulary').insert(vocabulary_data).execute()
-            if response.error:
-                raise Exception(f"Vocabulary database update error: {response.error}")
         except Exception as e:
             logger.error(f"Failed to update vocabulary table: {e}")
-            raise
+            raise Exception(f"Vocabulary database update error: {str(e)}")
     
     def send_notification_email(self, subject: str, message: str) -> None:
         """Send email notification for processing status"""
@@ -490,8 +484,6 @@ def add_pronunciation_fix():
         }
         
         response = supabase.table('pronunciation_fixes').insert(pronunciation_data).execute()
-        if response.error:
-            raise Exception(f"Database error: {response.error}")
         
         # Clear cache to reload on next use
         processor.pronunciation_cache = {}
