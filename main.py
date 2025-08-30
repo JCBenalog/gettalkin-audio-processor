@@ -374,10 +374,12 @@ def process_lesson_file(file_name: str, file_content: str) -> bool:
         lesson_match = re.search(r'Lesson (\d+)', file_name)
         lesson_number = int(lesson_match.group(1)) if lesson_match else 0
         
-        # Update database
+        # Update database with required fields
         lesson_data = {
             "lesson_number": lesson_number,
-            "title": file_name.replace('.docx', ''),
+            "title": file_name.replace('.docx', '').replace('.txt', '').replace('.csv', ''),
+            "description": f"Lesson {lesson_number}",
+            "level": "beginner",
             "audio_url": audio_url,
             "is_published": False,
             "created_by": USER_ID,
