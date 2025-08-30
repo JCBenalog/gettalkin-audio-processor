@@ -4,6 +4,7 @@ import csv
 import io
 import re
 import uuid
+import unicodedata
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import requests
@@ -260,22 +261,55 @@ class AudioProcessor:
         
         return self.call_elevenlabs_api(ssml_text, voice_config)
     
+    def sanitize_filename(self, word: str) -> str:
+        """Sanitize Hungarian words for safe file naming"""
+        # Remove or replace problematic characters
+        word = word.replace('.', '')
+        word = word.replace(',', '')
+        word = word.replace('?', '')
+        word = word.replace('!', '')
+        word = word.replace(':', '')
+        word = word.replace(';', '')
+        word = word.replace('"', '')
+        word = word.replace("'", '')
+        
+        # Convert Hungarian characters to ASCII equivalents
+        word = word.replace('á', 'a')
+        word = word.replace('é', 'e')
+        word = word.replace('í', 'i')
+        word = word.replace('ó', 'o')
+        word = word.replace('ö', 'o')
+        word = word.replace('ő', 'o')
+        word = word.replace('ú', 'u')
+        word = word.replace('ü', 'u')
+        word = word.replace('ű', 'u')
+        
+        # Handle spaces and create filename
+        words = word.split()
+        formatted_words = [w.capitalize() for w in words if w]  # Remove empty strings
+        return '-'.join(formatted_words) + '.wav'
+    
     def create_vocabulary_filename(self, word: str) -> str:
         """Create filename from Hungarian word/phrase"""
-        # Replace spaces with hyphens, capitalize each word
-        words = word.split()
-        formatted_words = [w.capitalize() for w in words]
-        return '-'.join(formatted_words) + '.wav'
+        return self.sanitize_filename(word)
     
     def validate_audio(self, audio_data: bytes, expected_min_size: int = 1000) -> bool:
         """Basic audio validation"""
         if len(audio_data) < expected_min_size:
+            logger.error(f"Audio validation failed: size {len(audio_data)} < {expected_min_size}")
             return False
         
         # Check for basic audio file headers (simplified)
-        if audio_data[:3] == b'ID3' or audio_data[:4] == b'RIFF':
+        if audio_data[:3] == b'ID3' or audio_data[:4] == b'RIFF' or audio_data[:4] == b'fLaC':
             return True
+        
+        # For MP3 files, check for MP3 frame header
+        if len(audio_data) >= 4:
+            # MP3 frame header starts with 0xFF and second byte has specific bits set
+            if audio_data[0] == 0xFF and (audio_data[1] & 0xE0) == 0xE0:
+                return True
             
+        logger.error("Audio validation failed: no valid audio header found")
         return False
     
     def upload_to_supabase_storage(self, file_path: str, audio_data: bytes, content_type: str = "audio/mpeg") -> str:
@@ -291,13 +325,28 @@ class AudioProcessor:
             logger.error(f"Failed to upload to Supabase: {e}")
             raise Exception(f"Supabase upload error: {str(e)}")
     
-    def update_lesson_database(self, lesson_data: Dict) -> None:
-        """Update lessons table in Supabase"""
+    def update_lesson_database(self, lesson_data: Dict) -> str:
+        """Update lessons table in Supabase and return lesson ID"""
         try:
             response = supabase.table('lessons').insert(lesson_data).execute()
+            if response.data and len(response.data) > 0:
+                return response.data[0]['id']  # Return the created lesson ID
+            else:
+                raise Exception("No lesson ID returned from database")
         except Exception as e:
             logger.error(f"Failed to update lessons table: {e}")
             raise Exception(f"Database update error: {str(e)}")
+    
+    def get_lesson_id_by_number(self, lesson_number: int) -> Optional[str]:
+        """Get lesson ID from database by lesson number"""
+        try:
+            response = supabase.table('lessons').select('id').eq('lesson_number', lesson_number).execute()
+            if response.data and len(response.data) > 0:
+                return response.data[0]['id']
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get lesson ID for lesson {lesson_number}: {e}")
+            return None
     
     def update_vocabulary_database(self, lesson_id: str, vocabulary_data: List[Dict]) -> None:
         """Update lesson_vocabulary table in Supabase"""
@@ -358,12 +407,15 @@ def process_lesson_file(file_name: str, file_content: str) -> bool:
         # Parse lesson script
         script_data = processor.parse_lesson_script(file_content)
         
+        if not script_data:
+            raise Exception("No valid script data found in file")
+        
         # Generate lesson audio
         audio_data = processor.generate_lesson_audio(script_data)
         
         # Validate audio
-        if not processor.validate_audio(audio_data):
-            raise Exception("Generated audio failed validation")
+        if not processor.validate_audio(audio_data, expected_min_size=5000):  # Higher threshold for lessons
+            raise Exception("Generated audio failed validation - audio too small or invalid format")
         
         # Upload to Supabase Storage
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -403,13 +455,20 @@ def process_vocabulary_file(file_name: str, file_content: str) -> bool:
         # Parse vocabulary CSV
         vocabulary_data = processor.parse_vocabulary_csv(file_content)
         
+        if not vocabulary_data:
+            raise Exception("No vocabulary data found in file")
+        
         # Extract lesson number from filename
         lesson_match = re.search(r'Lesson (\d+)', file_name)
         if not lesson_match:
             raise Exception("Could not extract lesson number from vocabulary filename")
         
-        lesson_number = lesson_match.group(1)
-        lesson_id = str(uuid.uuid4())  # Generate lesson ID - in production, lookup existing lesson
+        lesson_number = int(lesson_match.group(1))
+        
+        # Get the actual lesson ID from database
+        lesson_id = processor.get_lesson_id_by_number(lesson_number)
+        if not lesson_id:
+            raise Exception(f"No lesson found in database for lesson number {lesson_number}. Create the lesson first.")
         
         # Process each vocabulary word
         processed_vocabulary = []
@@ -423,9 +482,10 @@ def process_vocabulary_file(file_name: str, file_content: str) -> bool:
                 
                 # Validate audio
                 if not processor.validate_audio(audio_data, expected_min_size=500):
-                    raise Exception(f"Audio validation failed for word: {hungarian_word}")
+                    logger.warning(f"Audio validation failed for word: {hungarian_word}")
+                    continue  # Skip this word but continue with others
                 
-                # Create filename
+                # Create filename with sanitized characters
                 audio_filename = processor.create_vocabulary_filename(hungarian_word)
                 
                 # Upload to Supabase Storage
@@ -454,8 +514,9 @@ def process_vocabulary_file(file_name: str, file_content: str) -> bool:
         if processed_vocabulary:
             processor.update_vocabulary_database(lesson_id, processed_vocabulary)
             logger.info(f"Successfully processed {len(processed_vocabulary)} vocabulary words from {file_name}")
-        
-        return len(processed_vocabulary) > 0
+            return True
+        else:
+            raise Exception("No vocabulary words were successfully processed")
         
     except Exception as e:
         logger.error(f"Failed to process vocabulary file {file_name}: {e}")
