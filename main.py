@@ -83,35 +83,11 @@ class AudioProcessor:
 
     def detect_pause_context(self, narrator_text: str) -> str:
         """Detect if this NARRATOR line should trigger a pause"""
-        text_lower = narrator_text.lower().strip()
-        
-        # Explicit colon trigger (highest priority)
+        # Only colon trigger creates pauses
         if narrator_text.strip().endswith(':'):
             return "explicit_pause"
-            
-        # High-confidence pause patterns
-        high_confidence_patterns = [
-            "listen and repeat",
-            "repeat that", 
-            "try that again",
-            "repeat after",
-            "now repeat",
-            "say that again"
-        ]
         
-        for pattern in high_confidence_patterns:
-            if pattern in text_lower:
-                return "repeat_instruction"
-        
-        # Question-based prompts
-        if "how would you say" in text_lower:
-            return "translation_prompt"
-        if "now say" in text_lower:
-            return "production_prompt"
-        if "your turn" in text_lower:
-            return "your_turn"
-            
-        # Default - no pause
+        # Everything else is normal dialogue
         return "dialogue"
 
     def calculate_pedagogical_pause(self, following_text: str, context: str) -> float:
@@ -119,13 +95,13 @@ class AudioProcessor:
         if context == "dialogue":
             return 1.0  # Normal dialogue transition
             
-        # Count words in the phrase to be repeated
-        word_count = len(following_text.split())
-        
-        # Base timing: time to repeat aloud + pedagogical pause
-        if context == "explicit_pause" or context == "repeat_instruction":
+        if context == "explicit_pause":
+            # Count words in the phrase to be repeated
+            word_count = len(following_text.split())
+            
+            # Your manual timing: repeat aloud + beat or two
             if word_count == 1:
-                return 3.0  # Single word: repeat + beat
+                return 3.0  # Single word: repeat + pause
             elif word_count <= 3:
                 return 4.5  # Short phrase
             elif word_count <= 6:
@@ -133,53 +109,16 @@ class AudioProcessor:
             else:
                 return 8.0  # Long phrase
                 
-        elif context == "translation_prompt" or context == "production_prompt":
-            # Thinking time + production time
-            if word_count == 1:
-                return 4.0
-            elif word_count <= 3:
-                return 6.0
-            elif word_count <= 6:
-                return 8.0
-            else:
-                return 10.0
-                
-        elif context == "your_turn":
-            # Longer processing time for complex interactions
-            if word_count <= 2:
-                return 8.0
-            elif word_count <= 5:
-                return 12.0
-            else:
-                return 15.0
-                
-        return 2.0  # Default fallback
+        return 1.0  # Default fallback
 
     def generate_ssml(self, speaker: str, text: str) -> str:
-        """Generate SSML markup for enhanced speech synthesis"""
+        """Generate minimal SSML markup - testing without complex prosody"""
         # Apply pronunciation fixes for Hungarian speakers
         if speaker in ["Balasz", "Aggie"]:
             text = self.apply_pronunciation_fixes(text)
         
-        ssml = '<speak>'
-        
-        # Add voice-specific prosody
-        if speaker == "NARRATOR":
-            # Add emphasis for quoted phrases
-            text = re.sub(r'"([^"]*)"', r'<emphasis level="strong">"\1"</emphasis>', text)
-            
-            # Question intonation
-            if text.strip().endswith('?'):
-                text = f'<prosody pitch="high">{text}</prosody>'
-            
-            # Instructional clarity
-            ssml += f'<prosody rate="0.9">{text}</prosody>'
-        else:
-            # Hungarian speakers - normalize volume and pace
-            ssml += f'<prosody volume="medium" rate="1.0">{text}</prosody>'
-        
-        ssml += '</speak>'
-        return ssml
+        # Minimal SSML - just the text without prosody modifications
+        return text
 
     def parse_lesson_script(self, file_content: str) -> List[Dict]:
         """Parse lesson CSV content into structured data with pause detection"""
