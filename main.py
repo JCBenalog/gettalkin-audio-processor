@@ -112,16 +112,31 @@ class AudioProcessor:
         return 1.0  # Default fallback
 
     def generate_ssml(self, speaker: str, text: str) -> str:
-        """Generate minimal SSML markup - testing without complex prosody"""
+        """Generate SSML markup - minimal for narrator, raw for Hungarian speakers"""
         # Apply pronunciation fixes for Hungarian speakers
         if speaker in ["Balasz", "Aggie"]:
             text = self.apply_pronunciation_fixes(text)
+            # Return raw text for Hungarian speakers (they sounded better without SSML)
+            return text
         
-        # Minimal SSML - just the text without prosody modifications
+        # Narrator gets minimal SSML for natural delivery
+        if speaker == "NARRATOR":
+            ssml = '<speak>'
+            
+            # Basic question intonation
+            if text.strip().endswith('?'):
+                text = f'<prosody pitch="medium">{text}</prosody>'
+            
+            # Slight rate reduction for clarity
+            ssml += f'<prosody rate="0.95">{text}</prosody>'
+            ssml += '</speak>'
+            return ssml
+        
+        # Fallback for any other speakers
         return text
 
     def parse_lesson_script(self, file_content: str) -> List[Dict]:
-        """Parse lesson CSV content into structured data with pause detection"""
+        """Parse lesson CSV content into structured data with corrected pause detection"""
         lines = []
         
         try:
@@ -139,22 +154,26 @@ class AudioProcessor:
                 if line.startswith('"') and line.endswith('"'):
                     line = line[1:-1]
                 
-                # Default context
+                # Default context and pause
                 context = "dialogue"
                 pause_duration = 1.0
                 
-                # Check if this is a NARRATOR line that should trigger a pause
-                if speaker == "NARRATOR":
-                    pause_context = self.detect_pause_context(line)
+                # Check if THIS line has a colon (not just NARRATOR lines)
+                if line.strip().endswith(':'):
+                    context = "explicit_pause"
                     
-                    if pause_context != "dialogue":
-                        # Look ahead to the next line to calculate pause duration
+                    if speaker == "NARRATOR":
+                        # NARRATOR with colon: pause based on NEXT speaker's text
                         if i + 1 < len(script_data):
                             next_line = script_data[i + 1].get('line', '').strip()
                             if next_line.startswith('"') and next_line.endswith('"'):
                                 next_line = next_line[1:-1]
-                            pause_duration = self.calculate_pedagogical_pause(next_line, pause_context)
-                            context = pause_context
+                            pause_duration = self.calculate_pedagogical_pause(next_line, context)
+                    else:
+                        # Non-narrator with colon: pause based on THIS speaker's own text
+                        # Remove the colon for pause calculation
+                        text_for_pause = line.rstrip(':').strip()
+                        pause_duration = self.calculate_pedagogical_pause(text_for_pause, context)
                 
                 lines.append({
                     'speaker': speaker,
