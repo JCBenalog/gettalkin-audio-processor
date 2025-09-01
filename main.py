@@ -12,6 +12,9 @@ from flask import Flask, request, jsonify
 from supabase import create_client, Client
 import logging
 from pathlib import Path
+from pydub import AudioSegment
+from pydub.generators import Sine
+import tempfile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -26,7 +29,7 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 USER_ID = "795559fe-c8ff-4b09-9fc4-26560c2f4d89"
 NOTIFICATION_EMAIL = "dansally@gmail.com"
 
-# Voice Configuration
+# Voice Configuration - Updated with your settings
 VOICE_CONFIG = {
     "NARRATOR": {
         "voice_id": "L0Dsvb3SLTyegXwtm47J",
@@ -56,6 +59,7 @@ class AudioProcessor:
         self.pronunciation_cache = {}
         self.daily_usage = 0
         self.max_daily_lessons = 10
+        self.temp_dir = tempfile.mkdtemp()
         
     def load_pronunciation_dictionary(self) -> Dict[str, str]:
         """Load pronunciation corrections from Supabase"""
@@ -66,7 +70,7 @@ class AudioProcessor:
             logger.warning(f"Could not load pronunciation dictionary: {e}")
             # Return default corrections
             return {"szoba": "soba"}
-    
+
     def apply_pronunciation_fixes(self, text: str) -> str:
         """Apply pronunciation corrections to Hungarian text"""
         if not self.pronunciation_cache:
@@ -75,35 +79,84 @@ class AudioProcessor:
         corrected_text = text
         for original, corrected in self.pronunciation_cache.items():
             corrected_text = corrected_text.replace(original, corrected)
-        
         return corrected_text
-    
-    def calculate_pause_duration(self, text: str, context: str = "dialogue") -> float:
-        """Calculate pedagogically appropriate pause duration"""
-        word_count = len(text.split())
+
+    def detect_pause_context(self, narrator_text: str) -> str:
+        """Detect if this NARRATOR line should trigger a pause"""
+        text_lower = narrator_text.lower().strip()
         
-        if context == "your_turn":
-            if word_count <= 2:
-                return 8.0  # Simple recall
-            elif word_count <= 5:
-                return 12.0  # Contextual application
-            else:
-                return 15.0  # Complex construction
-        elif context == "repeat":
+        # Explicit colon trigger (highest priority)
+        if narrator_text.strip().endswith(':'):
+            return "explicit_pause"
+            
+        # High-confidence pause patterns
+        high_confidence_patterns = [
+            "listen and repeat",
+            "repeat that", 
+            "try that again",
+            "repeat after",
+            "now repeat",
+            "say that again"
+        ]
+        
+        for pattern in high_confidence_patterns:
+            if pattern in text_lower:
+                return "repeat_instruction"
+        
+        # Question-based prompts
+        if "how would you say" in text_lower:
+            return "translation_prompt"
+        if "now say" in text_lower:
+            return "production_prompt"
+        if "your turn" in text_lower:
+            return "your_turn"
+            
+        # Default - no pause
+        return "dialogue"
+
+    def calculate_pedagogical_pause(self, following_text: str, context: str) -> float:
+        """Calculate pause duration based on text complexity and pedagogical context"""
+        if context == "dialogue":
+            return 1.0  # Normal dialogue transition
+            
+        # Count words in the phrase to be repeated
+        word_count = len(following_text.split())
+        
+        # Base timing: time to repeat aloud + pedagogical pause
+        if context == "explicit_pause" or context == "repeat_instruction":
             if word_count == 1:
-                return 2.5
+                return 3.0  # Single word: repeat + beat
             elif word_count <= 3:
-                return 4.0
+                return 4.5  # Short phrase
             elif word_count <= 6:
-                return 6.0
+                return 6.0  # Medium phrase
             else:
+                return 8.0  # Long phrase
+                
+        elif context == "translation_prompt" or context == "production_prompt":
+            # Thinking time + production time
+            if word_count == 1:
+                return 4.0
+            elif word_count <= 3:
+                return 6.0
+            elif word_count <= 6:
                 return 8.0
-        else:  # normal dialogue
-            return 1.0
-    
-    def generate_ssml(self, speaker: str, text: str, context: str = "dialogue") -> str:
+            else:
+                return 10.0
+                
+        elif context == "your_turn":
+            # Longer processing time for complex interactions
+            if word_count <= 2:
+                return 8.0
+            elif word_count <= 5:
+                return 12.0
+            else:
+                return 15.0
+                
+        return 2.0  # Default fallback
+
+    def generate_ssml(self, speaker: str, text: str) -> str:
         """Generate SSML markup for enhanced speech synthesis"""
-        
         # Apply pronunciation fixes for Hungarian speakers
         if speaker in ["Balasz", "Aggie"]:
             text = self.apply_pronunciation_fixes(text)
@@ -114,9 +167,11 @@ class AudioProcessor:
         if speaker == "NARRATOR":
             # Add emphasis for quoted phrases
             text = re.sub(r'"([^"]*)"', r'<emphasis level="strong">"\1"</emphasis>', text)
+            
             # Question intonation
             if text.strip().endswith('?'):
                 text = f'<prosody pitch="high">{text}</prosody>'
+            
             # Instructional clarity
             ssml += f'<prosody rate="0.9">{text}</prosody>'
         else:
@@ -125,71 +180,59 @@ class AudioProcessor:
         
         ssml += '</speak>'
         return ssml
-    
+
     def parse_lesson_script(self, file_content: str) -> List[Dict]:
-        """Parse lesson DOCX content (CSV format) into structured data"""
+        """Parse lesson CSV content into structured data with pause detection"""
         lines = []
-        reader = csv.DictReader(io.StringIO(file_content))
         
-        for row in reader:
-            speaker = row.get('speaker', '').strip()
-            line = row.get('line', '').strip()
+        try:
+            reader = csv.DictReader(io.StringIO(file_content))
+            script_data = list(reader)
             
-            if speaker and line:
-                # Remove quotes around the line content
+            for i, row in enumerate(script_data):
+                speaker = row.get('speaker', '').strip()
+                line = row.get('line', '').strip()
+                
+                if not speaker or not line:
+                    continue
+                
+                # Remove quotes around the line content if present
                 if line.startswith('"') and line.endswith('"'):
                     line = line[1:-1]
                 
-                # Determine context for pause calculation
+                # Default context
                 context = "dialogue"
-                if "listen and repeat" in line.lower():
-                    context = "repeat"
-                elif "your turn" in line.lower() or "now say" in line.lower():
-                    context = "your_turn"
+                pause_duration = 1.0
+                
+                # Check if this is a NARRATOR line that should trigger a pause
+                if speaker == "NARRATOR":
+                    pause_context = self.detect_pause_context(line)
+                    
+                    if pause_context != "dialogue":
+                        # Look ahead to the next line to calculate pause duration
+                        if i + 1 < len(script_data):
+                            next_line = script_data[i + 1].get('line', '').strip()
+                            if next_line.startswith('"') and next_line.endswith('"'):
+                                next_line = next_line[1:-1]
+                            pause_duration = self.calculate_pedagogical_pause(next_line, pause_context)
+                            context = pause_context
                 
                 lines.append({
                     'speaker': speaker,
                     'text': line,
-                    'context': context
+                    'context': context,
+                    'pause_duration': pause_duration
                 })
-        
-        return lines
-    
-    def generate_lesson_audio(self, script_data: List[Dict]) -> bytes:
-        """Generate complete lesson audio from script data"""
-        audio_segments = []
-        
-        for i, segment in enumerate(script_data):
-            speaker = segment['speaker']
-            text = segment['text']
-            context = segment['context']
-            
-            # Generate SSML
-            ssml_text = self.generate_ssml(speaker, text, context)
-            
-            # Get voice configuration
-            voice_config = VOICE_CONFIG.get(speaker, VOICE_CONFIG["NARRATOR"])
-            
-            # Call ElevenLabs API
-            try:
-                audio_bytes = self.call_elevenlabs_api(ssml_text, voice_config)
-                audio_segments.append(audio_bytes)
                 
-                # Add pause after segment (except for last one)
-                if i < len(script_data) - 1:
-                    pause_duration = self.calculate_pause_duration(text, context)
-                    pause_audio = self.generate_silence(pause_duration)
-                    audio_segments.append(pause_audio)
-                    
-            except Exception as e:
-                logger.error(f"Failed to generate audio for segment: {e}")
-                raise
+        except Exception as e:
+            logger.error(f"Error parsing lesson script: {e}")
+            raise Exception(f"CSV parsing failed: {str(e)}")
         
-        # Combine all audio segments
-        return self.combine_audio_segments(audio_segments)
-    
+        logger.info(f"Parsed {len(lines)} lines from lesson script")
+        return lines
+
     def call_elevenlabs_api(self, text: str, voice_config: Dict) -> bytes:
-        """Make API call to ElevenLabs"""
+        """Make API call to ElevenLabs with improved settings"""
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_config['voice_id']}"
         
         headers = {
@@ -200,7 +243,7 @@ class AudioProcessor:
         
         data = {
             "text": text,
-            "model_id": "eleven_turbo_v2_5",
+            "model_id": "eleven_turbo_v2_5",  # Using your proven model from manual sessions
             "voice_settings": {
                 "stability": voice_config['stability'],
                 "similarity_boost": voice_config['similarity_boost'],
@@ -216,38 +259,128 @@ class AudioProcessor:
             raise Exception(error_msg)
         
         return response.content
-    
-    def generate_silence(self, duration: float) -> bytes:
+
+    def generate_silence(self, duration: float, sample_rate: int = 22050) -> AudioSegment:
         """Generate silence audio for specified duration"""
-        # This is a simplified approach - in production, you'd generate actual silence
-        # For now, we'll return empty bytes and handle pause timing in post-processing
-        return b''
-    
-    def combine_audio_segments(self, segments: List[bytes]) -> bytes:
-        """Combine multiple audio segments into single file"""
-        # Simplified combination - in production, use pydub or similar
-        combined = b''.join(segment for segment in segments if segment)
-        return combined
-    
+        # Generate silence in milliseconds
+        silence_ms = int(duration * 1000)
+        silence = AudioSegment.silent(duration=silence_ms, frame_rate=sample_rate)
+        return silence
+
+    def bytes_to_audio_segment(self, audio_bytes: bytes) -> AudioSegment:
+        """Convert bytes to AudioSegment for processing"""
+        # Create temporary file to load the MP3 data
+        temp_file = os.path.join(self.temp_dir, f"temp_audio_{uuid.uuid4().hex}.mp3")
+        
+        try:
+            with open(temp_file, 'wb') as f:
+                f.write(audio_bytes)
+            
+            audio_segment = AudioSegment.from_mp3(temp_file)
+            return audio_segment
+            
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+    def combine_audio_segments(self, segments: List[AudioSegment]) -> bytes:
+        """Combine multiple audio segments into single MP3 file"""
+        if not segments:
+            raise Exception("No audio segments to combine")
+        
+        # Start with the first segment
+        combined_audio = segments[0]
+        
+        # Add each subsequent segment
+        for segment in segments[1:]:
+            combined_audio += segment
+        
+        # Export to bytes
+        temp_file = os.path.join(self.temp_dir, f"combined_audio_{uuid.uuid4().hex}.mp3")
+        
+        try:
+            combined_audio.export(temp_file, format="mp3", bitrate="128k")
+            
+            with open(temp_file, 'rb') as f:
+                audio_bytes = f.read()
+            
+            return audio_bytes
+            
+        finally:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+    def generate_lesson_audio(self, script_data: List[Dict]) -> bytes:
+        """Generate complete lesson audio from script data with proper pauses"""
+        audio_segments = []
+        
+        logger.info(f"Generating audio for {len(script_data)} script segments")
+        
+        for i, segment in enumerate(script_data):
+            speaker = segment['speaker']
+            text = segment['text']
+            context = segment['context']
+            pause_duration = segment['pause_duration']
+            
+            logger.info(f"Processing segment {i+1}: {speaker} - {context} - pause: {pause_duration}s")
+            
+            # Generate SSML
+            ssml_text = self.generate_ssml(speaker, text)
+            
+            # Get voice configuration
+            voice_config = VOICE_CONFIG.get(speaker, VOICE_CONFIG["NARRATOR"])
+            
+            try:
+                # Generate audio for this segment
+                audio_bytes = self.call_elevenlabs_api(ssml_text, voice_config)
+                audio_segment = self.bytes_to_audio_segment(audio_bytes)
+                audio_segments.append(audio_segment)
+                
+                # Add pedagogical pause if this segment requires one
+                if context != "dialogue" and pause_duration > 1.0:
+                    logger.info(f"Adding pedagogical pause: {pause_duration}s")
+                    pause_segment = self.generate_silence(pause_duration)
+                    audio_segments.append(pause_segment)
+                elif i < len(script_data) - 1:  # Normal transition pause (except for last segment)
+                    pause_segment = self.generate_silence(pause_duration)
+                    audio_segments.append(pause_segment)
+                
+            except Exception as e:
+                logger.error(f"Failed to generate audio for segment {i+1}: {e}")
+                raise Exception(f"Audio generation failed at segment {i+1}: {str(e)}")
+        
+        # Combine all audio segments
+        logger.info("Combining audio segments")
+        combined_audio_bytes = self.combine_audio_segments(audio_segments)
+        
+        logger.info(f"Successfully generated lesson audio: {len(combined_audio_bytes)} bytes")
+        return combined_audio_bytes
+
     def parse_vocabulary_csv(self, file_content: str) -> List[Dict]:
         """Parse vocabulary CSV file"""
         vocabulary = []
-        reader = csv.DictReader(io.StringIO(file_content))
         
-        for row in reader:
-            hungarian_word = row.get('hungarian_word', '').strip()
-            english_translation = row.get('english_translation', '').strip()
-            difficulty = row.get('difficulty', 'beginner').strip()
-            
-            if hungarian_word and english_translation:
-                vocabulary.append({
-                    'hungarian_word': hungarian_word,
-                    'english_translation': english_translation,
-                    'difficulty': difficulty
-                })
+        try:
+            reader = csv.DictReader(io.StringIO(file_content))
+            for row in reader:
+                hungarian_word = row.get('hungarian_word', '').strip()
+                english_translation = row.get('english_translation', '').strip()
+                difficulty = row.get('difficulty', 'beginner').strip()
+                
+                if hungarian_word and english_translation:
+                    vocabulary.append({
+                        'hungarian_word': hungarian_word,
+                        'english_translation': english_translation,
+                        'difficulty': difficulty
+                    })
+                    
+        except Exception as e:
+            logger.error(f"Error parsing vocabulary CSV: {e}")
+            raise Exception(f"Vocabulary CSV parsing failed: {str(e)}")
         
         return vocabulary
-    
+
     def generate_vocabulary_audio(self, word: str) -> bytes:
         """Generate audio for single vocabulary word"""
         # Apply pronunciation fixes
@@ -260,58 +393,65 @@ class AudioProcessor:
         ssml_text = f'<speak><prosody rate="0.8">{corrected_word}</prosody></speak>'
         
         return self.call_elevenlabs_api(ssml_text, voice_config)
-    
+
     def sanitize_filename(self, word: str) -> str:
         """Sanitize Hungarian words for safe file naming"""
         # Remove or replace problematic characters
-        word = word.replace('.', '')
-        word = word.replace(',', '')
-        word = word.replace('?', '')
-        word = word.replace('!', '')
-        word = word.replace(':', '')
-        word = word.replace(';', '')
-        word = word.replace('"', '')
-        word = word.replace("'", '')
+        word = re.sub(r'[.,:;!?"\']', '', word)
         
         # Convert Hungarian characters to ASCII equivalents
-        word = word.replace('á', 'a')
-        word = word.replace('é', 'e')
-        word = word.replace('í', 'i')
-        word = word.replace('ó', 'o')
-        word = word.replace('ö', 'o')
-        word = word.replace('ő', 'o')
-        word = word.replace('ú', 'u')
-        word = word.replace('ü', 'u')
-        word = word.replace('ű', 'u')
+        replacements = {
+            'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ö': 'o', 'ő': 'o',
+            'ú': 'u', 'ü': 'u', 'ű': 'u'
+        }
+        
+        for original, replacement in replacements.items():
+            word = word.replace(original, replacement)
         
         # Handle spaces and create filename
         words = word.split()
-        formatted_words = [w.capitalize() for w in words if w]  # Remove empty strings
+        formatted_words = [w.capitalize() for w in words if w]
         return '-'.join(formatted_words) + '.wav'
-    
+
     def create_vocabulary_filename(self, word: str) -> str:
         """Create filename from Hungarian word/phrase"""
         return self.sanitize_filename(word)
-    
+
     def validate_audio(self, audio_data: bytes, expected_min_size: int = 1000) -> bool:
-        """Basic audio validation"""
+        """Enhanced audio validation"""
         if len(audio_data) < expected_min_size:
             logger.error(f"Audio validation failed: size {len(audio_data)} < {expected_min_size}")
             return False
         
-        # Check for basic audio file headers (simplified)
+        # Check for basic audio file headers
         if audio_data[:3] == b'ID3' or audio_data[:4] == b'RIFF' or audio_data[:4] == b'fLaC':
             return True
         
         # For MP3 files, check for MP3 frame header
         if len(audio_data) >= 4:
-            # MP3 frame header starts with 0xFF and second byte has specific bits set
             if audio_data[0] == 0xFF and (audio_data[1] & 0xE0) == 0xE0:
                 return True
+        
+        # Additional validation - try to load with pydub
+        try:
+            temp_file = os.path.join(self.temp_dir, f"validate_{uuid.uuid4().hex}.mp3")
+            with open(temp_file, 'wb') as f:
+                f.write(audio_data)
             
-        logger.error("Audio validation failed: no valid audio header found")
-        return False
-    
+            audio_segment = AudioSegment.from_mp3(temp_file)
+            os.remove(temp_file)
+            
+            # Check duration is reasonable (> 0.1 seconds)
+            if len(audio_segment) < 100:  # milliseconds
+                logger.error("Audio validation failed: duration too short")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Audio validation failed during pydub test: {e}")
+            return False
+
     def upload_to_supabase_storage(self, file_path: str, audio_data: bytes, content_type: str = "audio/mpeg") -> str:
         """Upload audio file to Supabase Storage"""
         try:
@@ -324,19 +464,40 @@ class AudioProcessor:
         except Exception as e:
             logger.error(f"Failed to upload to Supabase: {e}")
             raise Exception(f"Supabase upload error: {str(e)}")
-    
+
     def update_lesson_database(self, lesson_data: Dict) -> str:
-        """Update lessons table in Supabase and return lesson ID"""
+        """Update lessons table in Supabase with UPSERT logic"""
         try:
-            response = supabase.table('lessons').insert(lesson_data).execute()
-            if response.data and len(response.data) > 0:
-                return response.data[0]['id']  # Return the created lesson ID
+            lesson_number = lesson_data.get('lesson_number')
+            
+            # Check if lesson already exists
+            existing_lesson = supabase.table('lessons').select('id').eq('lesson_number', lesson_number).execute()
+            
+            if existing_lesson.data and len(existing_lesson.data) > 0:
+                # Lesson exists - UPDATE it
+                lesson_id = existing_lesson.data[0]['id']
+                logger.info(f"Updating existing lesson {lesson_number} with ID {lesson_id}")
+                
+                response = supabase.table('lessons').update(lesson_data).eq('id', lesson_id).execute()
+                
+                if response.data and len(response.data) > 0:
+                    return lesson_id
+                else:
+                    raise Exception(f"Update failed for lesson {lesson_number}")
             else:
-                raise Exception("No lesson ID returned from database")
+                # Lesson doesn't exist - INSERT it
+                logger.info(f"Creating new lesson {lesson_number}")
+                response = supabase.table('lessons').insert(lesson_data).execute()
+                
+                if response.data and len(response.data) > 0:
+                    return response.data[0]['id']
+                else:
+                    raise Exception("No lesson ID returned from database")
+                    
         except Exception as e:
-            logger.error(f"Failed to update lessons table: {e}")
-            raise Exception(f"Database update error: {str(e)}")
-    
+            logger.error(f"Failed to upsert lesson to database: {e}")
+            raise Exception(f"Database upsert error: {str(e)}")
+
     def get_lesson_id_by_number(self, lesson_number: int) -> Optional[str]:
         """Get lesson ID from database by lesson number"""
         try:
@@ -347,7 +508,7 @@ class AudioProcessor:
         except Exception as e:
             logger.error(f"Failed to get lesson ID for lesson {lesson_number}: {e}")
             return None
-    
+
     def update_vocabulary_database(self, lesson_id: str, vocabulary_data: List[Dict]) -> None:
         """Update lesson_vocabulary table in Supabase"""
         try:
@@ -358,12 +519,20 @@ class AudioProcessor:
         except Exception as e:
             logger.error(f"Failed to update vocabulary table: {e}")
             raise Exception(f"Vocabulary database update error: {str(e)}")
-    
+
     def send_notification_email(self, subject: str, message: str) -> None:
         """Send email notification for processing status"""
-        # Simplified email notification - in production, integrate with SendGrid
         logger.info(f"EMAIL NOTIFICATION: {subject} - {message}")
         # TODO: Implement actual email sending
+
+    def cleanup_temp_files(self):
+        """Clean up temporary files"""
+        try:
+            import shutil
+            if os.path.exists(self.temp_dir):
+                shutil.rmtree(self.temp_dir)
+        except Exception as e:
+            logger.warning(f"Failed to cleanup temp directory: {e}")
 
 # Initialize processor
 processor = AudioProcessor()
@@ -375,7 +544,7 @@ def handle_google_drive_webhook():
         data = request.get_json()
         file_name = data.get('fileName')
         file_content = data.get('fileContent')
-        file_type = data.get('fileType', 'lesson')  # 'lesson' or 'vocabulary'
+        file_type = data.get('fileType', 'lesson')
         
         logger.info(f"Processing file: {file_name}, type: {file_type}")
         
@@ -402,20 +571,21 @@ def handle_google_drive_webhook():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 def process_lesson_file(file_name: str, file_content: str) -> bool:
-    """Process full lesson script file"""
+    """Process full lesson script file with enhanced audio processing"""
     try:
         # Parse lesson script
         script_data = processor.parse_lesson_script(file_content)
-        
         if not script_data:
             raise Exception("No valid script data found in file")
         
-        # Generate lesson audio
+        logger.info(f"Generating lesson audio with pedagogical pauses")
+        
+        # Generate lesson audio with proper pauses
         audio_data = processor.generate_lesson_audio(script_data)
         
         # Validate audio
-        if not processor.validate_audio(audio_data, expected_min_size=5000):  # Higher threshold for lessons
-            raise Exception("Generated audio failed validation - audio too small or invalid format")
+        if not processor.validate_audio(audio_data, expected_min_size=10000):
+            raise Exception("Generated audio failed validation")
         
         # Upload to Supabase Storage
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -426,7 +596,7 @@ def process_lesson_file(file_name: str, file_content: str) -> bool:
         lesson_match = re.search(r'Lesson (\d+)', file_name)
         lesson_number = int(lesson_match.group(1)) if lesson_match else 0
         
-        # Update database with required fields
+        # Update database
         lesson_data = {
             "lesson_number": lesson_number,
             "title": file_name.replace('.docx', '').replace('.txt', '').replace('.csv', ''),
@@ -454,7 +624,6 @@ def process_vocabulary_file(file_name: str, file_content: str) -> bool:
     try:
         # Parse vocabulary CSV
         vocabulary_data = processor.parse_vocabulary_csv(file_content)
-        
         if not vocabulary_data:
             raise Exception("No vocabulary data found in file")
         
@@ -468,11 +637,10 @@ def process_vocabulary_file(file_name: str, file_content: str) -> bool:
         # Get the actual lesson ID from database
         lesson_id = processor.get_lesson_id_by_number(lesson_number)
         if not lesson_id:
-            raise Exception(f"No lesson found in database for lesson number {lesson_number}. Create the lesson first.")
+            raise Exception(f"No lesson found in database for lesson number {lesson_number}")
         
         # Process each vocabulary word
         processed_vocabulary = []
-        
         for vocab_item in vocabulary_data:
             hungarian_word = vocab_item['hungarian_word']
             
@@ -483,9 +651,9 @@ def process_vocabulary_file(file_name: str, file_content: str) -> bool:
                 # Validate audio
                 if not processor.validate_audio(audio_data, expected_min_size=500):
                     logger.warning(f"Audio validation failed for word: {hungarian_word}")
-                    continue  # Skip this word but continue with others
+                    continue
                 
-                # Create filename with sanitized characters
+                # Create filename
                 audio_filename = processor.create_vocabulary_filename(hungarian_word)
                 
                 # Upload to Supabase Storage
@@ -507,7 +675,6 @@ def process_vocabulary_file(file_name: str, file_content: str) -> bool:
                 
             except Exception as e:
                 logger.error(f"Failed to process vocabulary word '{hungarian_word}': {e}")
-                # Continue with other words rather than failing entire batch
                 continue
         
         # Update vocabulary database
@@ -517,7 +684,7 @@ def process_vocabulary_file(file_name: str, file_content: str) -> bool:
             return True
         else:
             raise Exception("No vocabulary words were successfully processed")
-        
+            
     except Exception as e:
         logger.error(f"Failed to process vocabulary file {file_name}: {e}")
         processor.send_notification_email("Vocabulary Processing Failed", f"File: {file_name}\nError: {str(e)}")
@@ -558,4 +725,8 @@ def add_pronunciation_fix():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=False)
+    try:
+        app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=False)
+    finally:
+        # Cleanup on shutdown
+        processor.cleanup_temp_files()
