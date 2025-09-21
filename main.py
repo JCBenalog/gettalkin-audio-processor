@@ -136,57 +136,100 @@ class AudioProcessor:
         return text
 
     def parse_lesson_script(self, file_content: str) -> List[Dict]:
-        """Parse lesson CSV content into structured data with corrected pause detection"""
+        """Parse lesson CSV content with manual parsing to handle nested quotes and commas"""
         lines = []
         
         try:
-            reader = csv.DictReader(io.StringIO(file_content))
-            script_data = list(reader)
+            # Split into lines and process manually
+            content_lines = file_content.strip().split('\n')
             
-            for i, row in enumerate(script_data):
-                speaker = row.get('speaker', '').strip()
-                line = row.get('line', '').strip()
-                
-                if not speaker or not line:
+            # Skip header line if present
+            start_index = 0
+            if content_lines[0].lower().startswith('speaker'):
+                start_index = 1
+            
+            for i, line in enumerate(content_lines[start_index:], start=start_index):
+                line = line.strip()
+                if not line:
                     continue
                 
-                # Remove quotes around the line content if present
-                if line.startswith('"') and line.endswith('"'):
-                    line = line[1:-1]
+                # Manual parsing: find first comma that's not inside quotes
+                in_quotes = False
+                comma_index = -1
+                
+                for j, char in enumerate(line):
+                    if char == '"':
+                        in_quotes = not in_quotes
+                    elif char == ',' and not in_quotes:
+                        comma_index = j
+                        break
+                
+                if comma_index == -1:
+                    logger.warning(f"No valid comma separator found in line {i+1}: {line}")
+                    continue
+                
+                speaker = line[:comma_index].strip()
+                dialogue = line[comma_index + 1:].strip()
+                
+                # Remove BOM character if present
+                if speaker.startswith('\ufeff'):
+                    speaker = speaker[1:]
+                
+                # Remove outer quotes from dialogue if present
+                if dialogue.startswith('"') and dialogue.endswith('"'):
+                    dialogue = dialogue[1:-1]
+                
+                # Validate speaker and dialogue
+                if not speaker or not dialogue:
+                    logger.warning(f"Empty speaker or dialogue at line {i+1}: '{speaker}' - '{dialogue}'")
+                    continue
                 
                 # Default context and pause
                 context = "dialogue"
                 pause_duration = 1.0
                 
-                # Check if THIS line has a colon (not just NARRATOR lines)
-                if line.strip().endswith(':'):
+                # Check if dialogue ends with colon for pedagogical pause
+                if dialogue.strip().endswith(':'):
                     context = "explicit_pause"
                     
                     if speaker == "NARRATOR":
                         # NARRATOR with colon: pause based on NEXT speaker's text
-                        if i + 1 < len(script_data):
-                            next_line = script_data[i + 1].get('line', '').strip()
-                            if next_line.startswith('"') and next_line.endswith('"'):
-                                next_line = next_line[1:-1]
-                            pause_duration = self.calculate_pedagogical_pause(next_line, context)
+                        if i + 1 < len(content_lines):
+                            next_line = content_lines[i + 1].strip()
+                            next_comma = -1
+                            next_in_quotes = False
+                            
+                            for k, char in enumerate(next_line):
+                                if char == '"':
+                                    next_in_quotes = not next_in_quotes
+                                elif char == ',' and not next_in_quotes:
+                                    next_comma = k
+                                    break
+                            
+                            if next_comma != -1:
+                                next_dialogue = next_line[next_comma + 1:].strip()
+                                if next_dialogue.startswith('"') and next_dialogue.endswith('"'):
+                                    next_dialogue = next_dialogue[1:-1]
+                                pause_duration = self.calculate_pedagogical_pause(next_dialogue, context)
                     else:
-                        # Non-narrator with colon: pause based on THIS speaker's own text
-                        # Remove the colon for pause calculation
-                        text_for_pause = line.rstrip(':').strip()
+                        # Non-narrator with colon: pause based on current text
+                        text_for_pause = dialogue.rstrip(':').strip()
                         pause_duration = self.calculate_pedagogical_pause(text_for_pause, context)
                 
                 lines.append({
                     'speaker': speaker,
-                    'text': line,
+                    'text': dialogue,
                     'context': context,
                     'pause_duration': pause_duration
                 })
                 
+                logger.info(f"Parsed line {len(lines)}: {speaker} - '{dialogue[:30]}...' - {context}")
+                
         except Exception as e:
             logger.error(f"Error parsing lesson script: {e}")
-            raise Exception(f"CSV parsing failed: {str(e)}")
+            raise Exception(f"Script parsing failed: {str(e)}")
         
-        logger.info(f"Parsed {len(lines)} lines from lesson script")
+        logger.info(f"Successfully parsed {len(lines)} valid lines from lesson script")
         return lines
 
     def call_elevenlabs_api(self, text: str, voice_config: Dict) -> bytes:
