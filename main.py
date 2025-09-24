@@ -139,6 +139,14 @@ class AudioProcessor:
         """Parse lesson CSV content with manual parsing to handle nested quotes and commas"""
         lines = []
         
+        # BULLETPROOF DEBUG - Multiple logging methods
+        print("=" * 80)
+        print("BULLETPROOF DEBUG: Starting parse_lesson_script")
+        print("=" * 80)
+        logger.info("=" * 80)
+        logger.info("BULLETPROOF DEBUG: Starting parse_lesson_script")
+        logger.info("=" * 80)
+        
         try:
             # Split into lines and process manually
             content_lines = file_content.strip().split('\n')
@@ -147,6 +155,9 @@ class AudioProcessor:
             start_index = 0
             if content_lines[0].lower().startswith('speaker'):
                 start_index = 1
+            
+            print(f"BULLETPROOF: Processing {len(content_lines)} total lines, starting from line {start_index}")
+            logger.info(f"BULLETPROOF: Processing {len(content_lines)} total lines, starting from line {start_index}")
             
             for i, line in enumerate(content_lines[start_index:], start=start_index):
                 line = line.strip()
@@ -165,6 +176,7 @@ class AudioProcessor:
                         break
                 
                 if comma_index == -1:
+                    print(f"BULLETPROOF WARNING: No comma found in line {i+1}: {line}")
                     logger.warning(f"No valid comma separator found in line {i+1}: {line}")
                     continue
                 
@@ -181,6 +193,7 @@ class AudioProcessor:
                 
                 # Validate speaker and dialogue
                 if not speaker or not dialogue:
+                    print(f"BULLETPROOF WARNING: Empty data at line {i+1}: speaker='{speaker}' dialogue='{dialogue}'")
                     logger.warning(f"Empty speaker or dialogue at line {i+1}: '{speaker}' - '{dialogue}'")
                     continue
                 
@@ -188,15 +201,19 @@ class AudioProcessor:
                 context = "dialogue"
                 pause_duration = 1.0
                 
-                # 🔍 DEBUG: Log every line before processing
-                logger.info(f"🔍 Processing line {i+1}: {speaker} - '{dialogue[-20:] if len(dialogue) > 20 else dialogue}...' - ends_with_colon: {dialogue.strip().endswith(':')}")
+                # BULLETPROOF DEBUG: Check colon detection
+                dialogue_ends_with_colon = dialogue.strip().endswith(':')
+                dialogue_preview = dialogue[-30:] if len(dialogue) > 30 else dialogue
+                
+                print(f"BULLETPROOF LINE {i+1}: speaker={speaker}, dialogue_ending='{dialogue_preview}', has_colon={dialogue_ends_with_colon}")
+                logger.info(f"BULLETPROOF LINE {i+1}: speaker={speaker}, dialogue_ending='{dialogue_preview}', has_colon={dialogue_ends_with_colon}")
                 
                 # Check if dialogue ends with colon for pedagogical pause
-                if dialogue.strip().endswith(':'):
+                if dialogue_ends_with_colon:
                     context = "explicit_pause"
                     
-                    # 🔍 DEBUG: Colon detected
-                    logger.info(f"🔍 COLON DETECTED on line {i+1}: {speaker} - '{dialogue[-10:] if len(dialogue) > 10 else dialogue}'")
+                    print(f"BULLETPROOF COLON FOUND: Line {i+1}, speaker={speaker}")
+                    logger.info(f"BULLETPROOF COLON FOUND: Line {i+1}, speaker={speaker}")
                     
                     if speaker == "NARRATOR":
                         # NARRATOR with colon: pause based on NEXT speaker's text
@@ -204,6 +221,9 @@ class AudioProcessor:
                             next_line = content_lines[i + 1].strip()
                             next_comma = -1
                             next_in_quotes = False
+                            
+                            print(f"BULLETPROOF NARRATOR: Processing next line: '{next_line}'")
+                            logger.info(f"BULLETPROOF NARRATOR: Processing next line: '{next_line}'")
                             
                             for k, char in enumerate(next_line):
                                 if char == '"':
@@ -216,23 +236,24 @@ class AudioProcessor:
                                 next_dialogue = next_line[next_comma + 1:].strip()
                                 if next_dialogue.startswith('"') and next_dialogue.endswith('"'):
                                     next_dialogue = next_dialogue[1:-1]
+                                
                                 pause_duration = self.calculate_pedagogical_pause(next_dialogue, context)
                                 
-                                # 🔍 DEBUG: NARRATOR colon processing
-                                logger.info(f"🔍 NARRATOR COLON: line={i+1}, dialogue_ending='{dialogue[-15:] if len(dialogue) > 15 else dialogue}', next_dialogue='{next_dialogue}', context={context}, calculated_pause={pause_duration}s")
+                                print(f"BULLETPROOF NARRATOR SUCCESS: line={i+1}, next_dialogue='{next_dialogue}', pause={pause_duration}s")
+                                logger.info(f"BULLETPROOF NARRATOR SUCCESS: line={i+1}, next_dialogue='{next_dialogue}', pause={pause_duration}s")
                             else:
-                                # 🔍 DEBUG: Failed to parse next line
-                                logger.warning(f"🔍 NARRATOR COLON FAILED: Could not parse next line after line {i+1}")
+                                print(f"BULLETPROOF NARRATOR FAIL: Could not parse next line comma at line {i+1}")
+                                logger.error(f"BULLETPROOF NARRATOR FAIL: Could not parse next line comma at line {i+1}")
                         else:
-                            # 🔍 DEBUG: No next line available
-                            logger.warning(f"🔍 NARRATOR COLON FAILED: No next line available after line {i+1}")
+                            print(f"BULLETPROOF NARRATOR FAIL: No next line available after line {i+1}")
+                            logger.error(f"BULLETPROOF NARRATOR FAIL: No next line available after line {i+1}")
                     else:
                         # Non-narrator with colon: pause based on current text
                         text_for_pause = dialogue.rstrip(':').strip()
                         pause_duration = self.calculate_pedagogical_pause(text_for_pause, context)
                         
-                        # 🔍 DEBUG: Non-narrator colon processing
-                        logger.info(f"🔍 {speaker} COLON: line={i+1}, text_for_pause='{text_for_pause}', context={context}, calculated_pause={pause_duration}s")
+                        print(f"BULLETPROOF NON-NARRATOR: line={i+1}, speaker={speaker}, text='{text_for_pause}', pause={pause_duration}s")
+                        logger.info(f"BULLETPROOF NON-NARRATOR: line={i+1}, speaker={speaker}, text='{text_for_pause}', pause={pause_duration}s")
                 
                 lines.append({
                     'speaker': speaker,
@@ -241,13 +262,29 @@ class AudioProcessor:
                     'pause_duration': pause_duration
                 })
                 
-                # 🔍 DEBUG: Final result for this line
-                logger.info(f"🔍 FINAL: Line {i+1} - {speaker} - context={context} - pause={pause_duration}s")
+                # BULLETPROOF FINAL RESULT
+                print(f"BULLETPROOF FINAL: Line {i+1} - {speaker} - context={context} - pause={pause_duration}s")
+                logger.info(f"BULLETPROOF FINAL: Line {i+1} - {speaker} - context={context} - pause={pause_duration}s")
+                
+                # SPECIAL CHECK: Look for the specific problem lines
+                if "Vörösmarty Square:" in dialogue:
+                    print("*** BULLETPROOF FOUND PROBLEM LINE 1: 'Vörösmarty Square:' ***")
+                    print(f"*** Context: {context}, Pause: {pause_duration}s ***")
+                    logger.info("*** BULLETPROOF FOUND PROBLEM LINE 1: 'Vörösmarty Square:' ***")
+                    logger.info(f"*** Context: {context}, Pause: {pause_duration}s ***")
+                
+                if "Where is THE Vörösmarty Square" in dialogue:
+                    print("*** BULLETPROOF FOUND PROBLEM LINE 2: Long instruction ending with colon ***")
+                    print(f"*** Context: {context}, Pause: {pause_duration}s ***")
+                    logger.info("*** BULLETPROOF FOUND PROBLEM LINE 2: Long instruction ending with colon ***")
+                    logger.info(f"*** Context: {context}, Pause: {pause_duration}s ***")
                 
         except Exception as e:
+            print(f"BULLETPROOF ERROR: {str(e)}")
             logger.error(f"Error parsing lesson script: {e}")
             raise Exception(f"Script parsing failed: {str(e)}")
         
+        print(f"BULLETPROOF COMPLETE: Successfully parsed {len(lines)} valid lines")
         logger.info(f"Successfully parsed {len(lines)} valid lines from lesson script")
         return lines
 
