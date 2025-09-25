@@ -22,15 +22,45 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-print("*** EXECUTION TEST: main.py module loading ***")
-logger.info("*** EXECUTION TEST: main.py module loading ***")
+# SECURE CONFIGURATION - Load from environment variables
+def load_config():
+    """Load configuration from environment variables with validation"""
+    config = {
+        'ELEVENLABS_API_KEY': os.getenv('ELEVENLABS_API_KEY'),
+        'SUPABASE_URL': os.getenv('SUPABASE_URL'),
+        'SUPABASE_KEY': os.getenv('SUPABASE_KEY'),
+        'USER_ID': os.getenv('USER_ID'),
+        'NOTIFICATION_EMAIL': os.getenv('NOTIFICATION_EMAIL')
+    }
+    
+    # Validate all required environment variables are present
+    missing_vars = [key for key, value in config.items() if not value]
+    if missing_vars:
+        error_msg = f"Missing required environment variables: {', '.join(missing_vars)}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
+    logger.info("✅ All environment variables loaded successfully")
+    return config
 
-# Configuration
-ELEVENLABS_API_KEY = "sk_66046ea215030b7f8855ab82c68697f0a78c4109520e9c79"
-SUPABASE_URL = "https://kkzfwplewbgivozyfvdm.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtremZ3cGxld2JnaXZvenlmdmRtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NjE1MzIwMiwiZXhwIjoyMDcxNzI5MjAyfQ.W3nPawG9FA8xsvC25g8A9Hjr6v9Zzl37A7knPr2tigw"
-USER_ID = "795559fe-c8ff-4b09-9fc4-26560c2f4d89"
-NOTIFICATION_EMAIL = "dansally@gmail.com"
+# Load configuration
+try:
+    config = load_config()
+    ELEVENLABS_API_KEY = config['ELEVENLABS_API_KEY']
+    SUPABASE_URL = config['SUPABASE_URL']
+    SUPABASE_KEY = config['SUPABASE_KEY']
+    USER_ID = config['USER_ID']
+    NOTIFICATION_EMAIL = config['NOTIFICATION_EMAIL']
+    
+    logger.info("🔐 Secure configuration loaded")
+    # Log partial keys for verification (first 6 chars + ...)
+    logger.info(f"ElevenLabs Key: {ELEVENLABS_API_KEY[:6]}...")
+    logger.info(f"Supabase URL: {SUPABASE_URL}")
+    
+except ValueError as e:
+    logger.error(f"❌ Configuration Error: {e}")
+    logger.error("💡 Make sure all environment variables are set in Railway dashboard")
+    raise
 
 # Voice Configuration - Updated with your settings
 VOICE_CONFIG = {
@@ -55,19 +85,20 @@ VOICE_CONFIG = {
 }
 
 # Initialize Supabase client
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-print("*** EXECUTION TEST: Configuration and supabase client loaded ***")
-logger.info("*** EXECUTION TEST: Configuration and supabase client loaded ***")
+try:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    logger.info("✅ Supabase client initialized")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize Supabase: {e}")
+    raise
 
 class AudioProcessor:
     def __init__(self):
-        print("*** EXECUTION TEST: AudioProcessor.__init__ called ***")
-        logger.info("*** EXECUTION TEST: AudioProcessor.__init__ called ***")
         self.pronunciation_cache = {}
         self.daily_usage = 0
         self.max_daily_lessons = 10
         self.temp_dir = tempfile.mkdtemp()
+        logger.info("🎵 AudioProcessor initialized")
         
     def load_pronunciation_dictionary(self) -> Dict[str, str]:
         """Load pronunciation corrections from Supabase"""
@@ -145,38 +176,21 @@ class AudioProcessor:
 
     def parse_lesson_script(self, file_content: str) -> List[Dict]:
         """Parse lesson CSV content with manual parsing to handle nested quotes and commas"""
-        
-        print("*** EXECUTION TEST: parse_lesson_script() function called ***")
-        logger.info("*** EXECUTION TEST: parse_lesson_script() function called ***")
-        print(f"*** EXECUTION TEST: Content length: {len(file_content)} characters ***")
-        logger.info(f"*** EXECUTION TEST: Content length: {len(file_content)} characters ***")
-        
         lines = []
         
         try:
             # Split into lines and process manually
             content_lines = file_content.strip().split('\n')
             
-            print(f"*** EXECUTION TEST: Split into {len(content_lines)} lines ***")
-            logger.info(f"*** EXECUTION TEST: Split into {len(content_lines)} lines ***")
-            
             # Skip header line if present
             start_index = 0
             if content_lines[0].lower().startswith('speaker'):
                 start_index = 1
-                print("*** EXECUTION TEST: Found header line, skipping ***")
-                logger.info("*** EXECUTION TEST: Found header line, skipping ***")
-            
-            print(f"*** EXECUTION TEST: Processing lines from index {start_index} ***")
-            logger.info(f"*** EXECUTION TEST: Processing lines from index {start_index} ***")
             
             for i, line in enumerate(content_lines[start_index:], start=start_index):
                 line = line.strip()
                 if not line:
                     continue
-                
-                print(f"*** EXECUTION TEST: Processing line {i+1}: {line[:50]}... ***")
-                logger.info(f"*** EXECUTION TEST: Processing line {i+1}: {line[:50]}... ***")
                 
                 # Manual parsing: find first comma that's not inside quotes
                 in_quotes = False
@@ -190,15 +204,11 @@ class AudioProcessor:
                         break
                 
                 if comma_index == -1:
-                    print(f"*** EXECUTION TEST: WARNING - No comma found in line {i+1} ***")
                     logger.warning(f"No valid comma separator found in line {i+1}: {line}")
                     continue
                 
                 speaker = line[:comma_index].strip()
                 dialogue = line[comma_index + 1:].strip()
-                
-                print(f"*** EXECUTION TEST: Parsed - Speaker: '{speaker}', Dialogue: '{dialogue[:30]}...' ***")
-                logger.info(f"*** EXECUTION TEST: Parsed - Speaker: '{speaker}', Dialogue: '{dialogue[:30]}...' ***")
                 
                 # Remove BOM character if present
                 if speaker.startswith('\ufeff'):
@@ -210,7 +220,6 @@ class AudioProcessor:
                 
                 # Validate speaker and dialogue
                 if not speaker or not dialogue:
-                    print(f"*** EXECUTION TEST: WARNING - Empty data at line {i+1} ***")
                     logger.warning(f"Empty speaker or dialogue at line {i+1}: '{speaker}' - '{dialogue}'")
                     continue
                 
@@ -218,28 +227,14 @@ class AudioProcessor:
                 context = "dialogue"
                 pause_duration = 1.0
                 
-                # Check colon detection
-                has_colon = dialogue.strip().endswith(':')
-                print(f"*** EXECUTION TEST: Line {i+1} colon check: '{dialogue[-10:]}' ends with colon: {has_colon} ***")
-                logger.info(f"*** EXECUTION TEST: Line {i+1} colon check: '{dialogue[-10:]}' ends with colon: {has_colon} ***")
-                
                 # Check if dialogue ends with colon for pedagogical pause
-                if has_colon:
+                if dialogue.strip().endswith(':'):
                     context = "explicit_pause"
                     
-                    print(f"*** EXECUTION TEST: COLON DETECTED - Line {i+1}, Speaker: {speaker} ***")
-                    logger.info(f"*** EXECUTION TEST: COLON DETECTED - Line {i+1}, Speaker: {speaker} ***")
-                    
                     if speaker == "NARRATOR":
-                        print(f"*** EXECUTION TEST: NARRATOR with colon detected at line {i+1} ***")
-                        logger.info(f"*** EXECUTION TEST: NARRATOR with colon detected at line {i+1} ***")
-                        
                         # NARRATOR with colon: pause based on NEXT speaker's text
                         if i + 1 < len(content_lines):
                             next_line = content_lines[i + 1].strip()
-                            print(f"*** EXECUTION TEST: Next line for NARRATOR: '{next_line}' ***")
-                            logger.info(f"*** EXECUTION TEST: Next line for NARRATOR: '{next_line}' ***")
-                            
                             next_comma = -1
                             next_in_quotes = False
                             
@@ -254,37 +249,11 @@ class AudioProcessor:
                                 next_dialogue = next_line[next_comma + 1:].strip()
                                 if next_dialogue.startswith('"') and next_dialogue.endswith('"'):
                                     next_dialogue = next_dialogue[1:-1]
-                                
                                 pause_duration = self.calculate_pedagogical_pause(next_dialogue, context)
-                                
-                                print(f"*** EXECUTION TEST: NARRATOR SUCCESS - Next dialogue: '{next_dialogue}', Pause: {pause_duration}s ***")
-                                logger.info(f"*** EXECUTION TEST: NARRATOR SUCCESS - Next dialogue: '{next_dialogue}', Pause: {pause_duration}s ***")
-                            else:
-                                print(f"*** EXECUTION TEST: NARRATOR FAILED - Could not parse next line comma ***")
-                                logger.error(f"*** EXECUTION TEST: NARRATOR FAILED - Could not parse next line comma ***")
-                        else:
-                            print(f"*** EXECUTION TEST: NARRATOR FAILED - No next line available ***")
-                            logger.error(f"*** EXECUTION TEST: NARRATOR FAILED - No next line available ***")
                     else:
                         # Non-narrator with colon: pause based on current text
                         text_for_pause = dialogue.rstrip(':').strip()
                         pause_duration = self.calculate_pedagogical_pause(text_for_pause, context)
-                        
-                        print(f"*** EXECUTION TEST: {speaker} with colon - Text: '{text_for_pause}', Pause: {pause_duration}s ***")
-                        logger.info(f"*** EXECUTION TEST: {speaker} with colon - Text: '{text_for_pause}', Pause: {pause_duration}s ***")
-                
-                # Check for specific problem lines
-                if "Vörösmarty Square:" in dialogue:
-                    print("*** EXECUTION TEST: FOUND PROBLEM LINE 1 - 'Vörösmarty Square:' ***")
-                    print(f"*** EXECUTION TEST: Context: {context}, Pause: {pause_duration}s ***")
-                    logger.info("*** EXECUTION TEST: FOUND PROBLEM LINE 1 - 'Vörösmarty Square:' ***")
-                    logger.info(f"*** EXECUTION TEST: Context: {context}, Pause: {pause_duration}s ***")
-                
-                if "Where is THE Vörösmarty Square" in dialogue:
-                    print("*** EXECUTION TEST: FOUND PROBLEM LINE 2 - Long instruction ***")
-                    print(f"*** EXECUTION TEST: Context: {context}, Pause: {pause_duration}s ***")
-                    logger.info("*** EXECUTION TEST: FOUND PROBLEM LINE 2 - Long instruction ***")
-                    logger.info(f"*** EXECUTION TEST: Context: {context}, Pause: {pause_duration}s ***")
                 
                 lines.append({
                     'speaker': speaker,
@@ -293,15 +262,12 @@ class AudioProcessor:
                     'pause_duration': pause_duration
                 })
                 
-                print(f"*** EXECUTION TEST: FINAL RESULT - Line {i+1}: {speaker}, Context: {context}, Pause: {pause_duration}s ***")
-                logger.info(f"*** EXECUTION TEST: FINAL RESULT - Line {i+1}: {speaker}, Context: {context}, Pause: {pause_duration}s ***")
+                logger.info(f"Parsed line {len(lines)}: {speaker} - '{dialogue[:30]}...' - {context}")
                 
         except Exception as e:
-            print(f"*** EXECUTION TEST: ERROR in parse_lesson_script: {str(e)} ***")
             logger.error(f"Error parsing lesson script: {e}")
             raise Exception(f"Script parsing failed: {str(e)}")
         
-        print(f"*** EXECUTION TEST: parse_lesson_script COMPLETE - {len(lines)} lines parsed ***")
         logger.info(f"Successfully parsed {len(lines)} valid lines from lesson script")
         return lines
 
@@ -312,7 +278,7 @@ class AudioProcessor:
         headers = {
             "Accept": "audio/mpeg",
             "Content-Type": "application/json",
-            "xi-api-key": ELEVENLABS_API_KEY
+            "xi-api-key": ELEVENLABS_API_KEY  # Uses secure environment variable
         }
         
         data = {
@@ -387,9 +353,6 @@ class AudioProcessor:
 
     def generate_lesson_audio(self, script_data: List[Dict]) -> bytes:
         """Generate complete lesson audio from script data with proper pauses"""
-        print(f"*** EXECUTION TEST: generate_lesson_audio called with {len(script_data)} segments ***")
-        logger.info(f"*** EXECUTION TEST: generate_lesson_audio called with {len(script_data)} segments ***")
-        
         audio_segments = []
         
         logger.info(f"Generating audio for {len(script_data)} script segments")
@@ -618,25 +581,17 @@ class AudioProcessor:
             logger.warning(f"Failed to cleanup temp directory: {e}")
 
 # Initialize processor
-print("*** EXECUTION TEST: Initializing AudioProcessor ***")
-logger.info("*** EXECUTION TEST: Initializing AudioProcessor ***")
 processor = AudioProcessor()
-print("*** EXECUTION TEST: AudioProcessor initialized ***")
-logger.info("*** EXECUTION TEST: AudioProcessor initialized ***")
 
 @app.route('/webhook/google-drive', methods=['POST'])
 def handle_google_drive_webhook():
     """Handle webhook from Google Drive Apps Script"""
-    print("*** EXECUTION TEST: Webhook endpoint called ***")
-    logger.info("*** EXECUTION TEST: Webhook endpoint called ***")
-    
     try:
         data = request.get_json()
         file_name = data.get('fileName')
         file_content = data.get('fileContent')
         file_type = data.get('fileType', 'lesson')
         
-        print(f"*** EXECUTION TEST: Processing file: {file_name}, type: {file_type} ***")
         logger.info(f"Processing file: {file_name}, type: {file_type}")
         
         # Check daily usage limits
@@ -644,8 +599,6 @@ def handle_google_drive_webhook():
             raise Exception("Daily processing limit reached")
         
         if file_type == 'lesson':
-            print("*** EXECUTION TEST: Calling process_lesson_file ***")
-            logger.info("*** EXECUTION TEST: Calling process_lesson_file ***")
             success = process_lesson_file(file_name, file_content)
         elif file_type == 'vocabulary':
             success = process_vocabulary_file(file_name, file_content)
@@ -659,30 +612,15 @@ def handle_google_drive_webhook():
             return jsonify({"status": "error", "message": "Processing failed"}), 500
             
     except Exception as e:
-        print(f"*** EXECUTION TEST: Webhook error: {str(e)} ***")
         logger.error(f"Webhook processing error: {e}")
         processor.send_notification_email("Processing Failed", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 def process_lesson_file(file_name: str, file_content: str) -> bool:
     """Process full lesson script file with enhanced audio processing"""
-    print("*** EXECUTION TEST: process_lesson_file() called ***")
-    print(f"*** EXECUTION TEST: File name: {file_name} ***")
-    print(f"*** EXECUTION TEST: Content length: {len(file_content)} characters ***")
-    logger.info("*** EXECUTION TEST: process_lesson_file() called ***")
-    logger.info(f"*** EXECUTION TEST: File name: {file_name} ***")
-    logger.info(f"*** EXECUTION TEST: Content length: {len(file_content)} characters ***")
-    
     try:
-        print("*** EXECUTION TEST: About to call parse_lesson_script ***")
-        logger.info("*** EXECUTION TEST: About to call parse_lesson_script ***")
-        
         # Parse lesson script
         script_data = processor.parse_lesson_script(file_content)
-        
-        print(f"*** EXECUTION TEST: parse_lesson_script returned {len(script_data) if script_data else 0} items ***")
-        logger.info(f"*** EXECUTION TEST: parse_lesson_script returned {len(script_data) if script_data else 0} items ***")
-        
         if not script_data:
             raise Exception("No valid script data found in file")
         
@@ -719,12 +657,10 @@ def process_lesson_file(file_name: str, file_content: str) -> bool:
         
         processor.update_lesson_database(lesson_data)
         
-        print(f"*** EXECUTION TEST: Successfully processed lesson: {file_name} ***")
         logger.info(f"Successfully processed lesson: {file_name}")
         return True
         
     except Exception as e:
-        print(f"*** EXECUTION TEST: Failed to process lesson file {file_name}: {e} ***")
         logger.error(f"Failed to process lesson file {file_name}: {e}")
         processor.send_notification_email("Lesson Processing Failed", f"File: {file_name}\nError: {str(e)}")
         return False
@@ -802,8 +738,23 @@ def process_vocabulary_file(file_name: str, file_content: str) -> bool:
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
-    return jsonify({"status": "healthy", "daily_usage": processor.daily_usage})
+    """Health check endpoint with configuration status"""
+    try:
+        config_status = {
+            "elevenlabs_key_loaded": bool(ELEVENLABS_API_KEY),
+            "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
+            "user_id_set": bool(USER_ID),
+            "daily_usage": processor.daily_usage,
+            "max_daily_lessons": processor.max_daily_lessons
+        }
+        
+        return jsonify({
+            "status": "healthy", 
+            "config": config_status,
+            "message": "🔐 Secure GetTalkin Audio Processor running"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/pronunciation', methods=['POST'])
 def add_pronunciation_fix():
@@ -834,13 +785,10 @@ def add_pronunciation_fix():
         logger.error(f"Failed to add pronunciation fix: {e}")
         return jsonify({"error": str(e)}), 500
 
-print("*** EXECUTION TEST: All functions defined, starting Flask app ***")
-logger.info("*** EXECUTION TEST: All functions defined, starting Flask app ***")
-
 if __name__ == '__main__':
     try:
-        print("*** EXECUTION TEST: Flask app starting ***")
-        logger.info("*** EXECUTION TEST: Flask app starting ***")
+        logger.info("🚀 Starting GetTalkin Audio Processor (Secure Version)")
+        logger.info("🔐 All secrets loaded from environment variables")
         app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=False)
     finally:
         # Cleanup on shutdown
