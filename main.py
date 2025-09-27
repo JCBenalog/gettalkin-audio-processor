@@ -187,8 +187,9 @@ class AudioProcessor:
             if content_lines[0].lower().startswith('speaker'):
                 start_index = 1
             
-            for i, line in enumerate(content_lines[start_index:], start=start_index):
-                line = line.strip()
+            # FIXED: Use simple range instead of enumerate with start parameter
+            for i in range(start_index, len(content_lines)):
+                line = content_lines[i].strip()
                 if not line:
                     continue
                 
@@ -233,6 +234,7 @@ class AudioProcessor:
                     
                     if speaker == "NARRATOR":
                         # NARRATOR with colon: pause based on NEXT speaker's text
+                        # FIXED: Now i+1 correctly points to the actual next line
                         if i + 1 < len(content_lines):
                             next_line = content_lines[i + 1].strip()
                             next_comma = -1
