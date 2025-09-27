@@ -229,7 +229,9 @@ class AudioProcessor:
                 pause_duration = 1.0
                 
                 # Check if dialogue ends with colon for pedagogical pause
-                if dialogue.strip().endswith(':'):
+                # Handle both straight quotes (":) and curly quotes (":)
+                dialogue_clean = dialogue.strip()
+                if dialogue_clean.endswith(':') or dialogue_clean.endswith('":'):
                     context = "explicit_pause"
                     
                     if speaker == "NARRATOR":
@@ -254,7 +256,7 @@ class AudioProcessor:
                                 pause_duration = self.calculate_pedagogical_pause(next_dialogue, context)
                     else:
                         # Non-narrator with colon: pause based on current text
-                        text_for_pause = dialogue.rstrip(':').strip()
+                        text_for_pause = dialogue.rstrip(':').rstrip('":').strip()
                         pause_duration = self.calculate_pedagogical_pause(text_for_pause, context)
                 
                 lines.append({
@@ -275,7 +277,7 @@ class AudioProcessor:
         # SIMPLE DEBUG: Log all NARRATOR lines with colons and their pause durations
         logger.info("=== PAUSE DEBUG ANALYSIS ===")
         for i, line in enumerate(lines):
-            if line['speaker'] == 'NARRATOR' and line['text'].strip().endswith(':'):
+            if line['speaker'] == 'NARRATOR' and (line['text'].strip().endswith(':') or line['text'].strip().endswith('":"')):
                 logger.info(f"NARRATOR COLON Line {i+1}: '{line['text'][:50]}...' -> {line['pause_duration']}s pause")
         logger.info("=== END PAUSE DEBUG ===")
         
