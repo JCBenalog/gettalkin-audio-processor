@@ -179,8 +179,8 @@ class AudioProcessor:
         lines = []
         
         try:
-            # Normalize curly quotes to straight quotes before processing
-            file_content = file_content.replace('"', '"').replace('"', '"')
+            # Normalize all curly quote variants to straight quotes before processing
+            file_content = file_content.replace('"', '"').replace('"', '"').replace('"', '"')
             
             # Split into lines and process manually
             content_lines = file_content.strip().split('\n')
@@ -231,17 +231,9 @@ class AudioProcessor:
                 context = "dialogue"
                 pause_duration = 1.0
                 
-                # ENHANCED DEBUG: Check colon detection for ALL lines
-                dialogue_clean = dialogue.strip()
-                has_colon = dialogue_clean.endswith(':')
-                
-                # Debug logging for colon detection
-                logger.info(f"COLON DEBUG Line {i+1}: Speaker='{speaker}' | Text='{dialogue_clean[:50]}...' | Ends with colon: {has_colon} | Last 3 chars: {repr(dialogue_clean[-3:]) if len(dialogue_clean) >= 3 else repr(dialogue_clean)}")
-                
                 # Check if dialogue ends with colon for pedagogical pause
-                if has_colon:
+                if dialogue.strip().endswith(':'):
                     context = "explicit_pause"
-                    logger.info(f"COLON SUCCESS Line {i+1}: Setting explicit_pause for {speaker}")
                     
                     if speaker == "NARRATOR":
                         # NARRATOR with colon: pause based on NEXT speaker's text
@@ -263,12 +255,10 @@ class AudioProcessor:
                                 if next_dialogue.startswith('"') and next_dialogue.endswith('"'):
                                     next_dialogue = next_dialogue[1:-1]
                                 pause_duration = self.calculate_pedagogical_pause(next_dialogue, context)
-                                logger.info(f"NARRATOR PAUSE CALC Line {i+1}: Next text='{next_dialogue[:30]}...' | Pause={pause_duration}s")
                     else:
                         # Non-narrator with colon: pause based on current text
                         text_for_pause = dialogue.rstrip(':').strip()
                         pause_duration = self.calculate_pedagogical_pause(text_for_pause, context)
-                        logger.info(f"NON-NARRATOR PAUSE CALC Line {i+1}: Current text='{text_for_pause[:30]}...' | Pause={pause_duration}s")
                 
                 lines.append({
                     'speaker': speaker,
