@@ -223,6 +223,9 @@ class AudioProcessor:
                     logger.warning(f"Empty speaker or dialogue at line {i+1}: '{speaker}' - '{dialogue}'")
                     continue
                 
+                # DEBUG: Log the parsed line before pause calculation
+                logger.info(f"🔍 DEBUG - Line {i+1}: Speaker='{speaker}', Dialogue='{dialogue}'")
+                
                 # Default context and pause
                 context = "dialogue"
                 pause_duration = 1.0
@@ -230,11 +233,20 @@ class AudioProcessor:
                 # Check if dialogue ends with colon for pedagogical pause
                 if dialogue.strip().endswith(':'):
                     context = "explicit_pause"
+                    logger.info(f"🔍 DEBUG - Found colon at end of dialogue for {speaker}")
                     
                     if speaker == "NARRATOR":
                         # NARRATOR with colon: pause based on NEXT speaker's text
-                        if i + 1 < len(content_lines):
-                            next_line = content_lines[i + 1].strip()
+                        logger.info(f"🔍 DEBUG - NARRATOR with colon, looking ahead to next line...")
+                        
+                        # Calculate the actual next line index
+                        next_line_index = i + 1
+                        logger.info(f"🔍 DEBUG - Current line index: {i}, Next line index: {next_line_index}, Total lines: {len(content_lines)}")
+                        
+                        if next_line_index < len(content_lines):
+                            next_line = content_lines[next_line_index].strip()
+                            logger.info(f"🔍 DEBUG - Raw next line: '{next_line}'")
+                            
                             next_comma = -1
                             next_in_quotes = False
                             
@@ -246,14 +258,29 @@ class AudioProcessor:
                                     break
                             
                             if next_comma != -1:
+                                next_speaker = next_line[:next_comma].strip()
                                 next_dialogue = next_line[next_comma + 1:].strip()
+                                
                                 if next_dialogue.startswith('"') and next_dialogue.endswith('"'):
                                     next_dialogue = next_dialogue[1:-1]
+                                
+                                logger.info(f"🔍 DEBUG - Parsed next line: Speaker='{next_speaker}', Dialogue='{next_dialogue}'")
+                                logger.info(f"🔍 DEBUG - Using next dialogue for pause calculation: '{next_dialogue}'")
+                                
                                 pause_duration = self.calculate_pedagogical_pause(next_dialogue, context)
+                                logger.info(f"🔍 DEBUG - Calculated pause duration: {pause_duration}s")
+                            else:
+                                logger.warning(f"🔍 DEBUG - Could not parse next line comma: '{next_line}'")
+                        else:
+                            logger.warning(f"🔍 DEBUG - No next line available for NARRATOR colon")
                     else:
                         # Non-narrator with colon: pause based on current text
                         text_for_pause = dialogue.rstrip(':').strip()
+                        logger.info(f"🔍 DEBUG - Non-narrator with colon, using current text: '{text_for_pause}'")
                         pause_duration = self.calculate_pedagogical_pause(text_for_pause, context)
+                        logger.info(f"🔍 DEBUG - Calculated pause duration: {pause_duration}s")
+                else:
+                    logger.info(f"🔍 DEBUG - No colon found, using default dialogue context")
                 
                 lines.append({
                     'speaker': speaker,
@@ -262,7 +289,7 @@ class AudioProcessor:
                     'pause_duration': pause_duration
                 })
                 
-                logger.info(f"Parsed line {len(lines)}: {speaker} - '{dialogue[:30]}...' - {context}")
+                logger.info(f"Parsed line {len(lines)}: {speaker} - '{dialogue[:30]}...' - {context} - {pause_duration}s pause")
                 
         except Exception as e:
             logger.error(f"Error parsing lesson script: {e}")
