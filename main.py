@@ -53,7 +53,6 @@ try:
     NOTIFICATION_EMAIL = config['NOTIFICATION_EMAIL']
     
     logger.info("Secure configuration loaded")
-    # Log partial keys for verification (first 6 chars + ...)
     logger.info(f"ElevenLabs Key: {ELEVENLABS_API_KEY[:6]}...")
     logger.info(f"Supabase URL: {SUPABASE_URL}")
     
@@ -178,9 +177,6 @@ class AudioProcessor:
         # Normalize line endings
         file_content = file_content.replace('\r\n', '\n').replace('\r', '\n')
         
-        # DO NOT use regex to manipulate text structure
-        # DO NOT remove punctuation (periods, commas, colons, etc.)
-        
         return file_content
 
     def parse_lesson_script(self, file_content: str) -> List[Dict]:
@@ -248,6 +244,7 @@ class AudioProcessor:
                     
                     if speaker == "NARRATOR":
                         # NARRATOR with colon: pause based on NEXT speaker's text
+                        next_text_found = False
                         if i + 1 < len(content_lines):
                             next_line = content_lines[i + 1].strip()
                             next_comma = -1
@@ -265,6 +262,13 @@ class AudioProcessor:
                                 if next_dialogue.startswith('"') and next_dialogue.endswith('"'):
                                     next_dialogue = next_dialogue[1:-1]
                                 pause_duration = self.calculate_pedagogical_pause(next_dialogue, context)
+                                next_text_found = True
+                        
+                        # If we couldn't parse next line, use current text length as fallback
+                        if not next_text_found:
+                            logger.warning(f"NARRATOR colon at line {i+1} but couldn't parse next line, using current text for pause")
+                            text_for_pause = dialogue.rstrip(':').strip()
+                            pause_duration = self.calculate_pedagogical_pause(text_for_pause, context)
                     else:
                         # Non-narrator with colon: pause based on current text
                         text_for_pause = dialogue.rstrip(':').strip()
@@ -277,7 +281,8 @@ class AudioProcessor:
                     'pause_duration': pause_duration
                 })
                 
-                logger.info(f"Parsed line {len(lines)}: {speaker} - '{dialogue[:30]}...' - {context}")
+                # Log with actual line number from file
+                logger.info(f"Parsed line {i+1}: {speaker} - '{dialogue[:30]}...' - {context} - pause: {pause_duration}s")
                 
         except Exception as e:
             logger.error(f"Error parsing lesson script: {e}")
@@ -288,8 +293,8 @@ class AudioProcessor:
         # Pause debug analysis
         logger.info("=== PAUSE DEBUG ANALYSIS ===")
         for i, line in enumerate(lines):
-            if line['speaker'] == 'NARRATOR' and line['text'].strip().endswith(':'):
-                logger.info(f"NARRATOR COLON Line {i+1}: '{line['text'][:50]}...' -> {line['pause_duration']}s pause")
+            if line['text'].strip().endswith(':'):
+                logger.info(f"{line['speaker']} COLON at position {i+1}: '{line['text'][:50]}...' -> {line['pause_duration']}s pause")
         logger.info("=== END PAUSE DEBUG ===")
         
         return lines
