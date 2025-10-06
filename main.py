@@ -120,7 +120,7 @@ class AudioProcessor:
 
     def detect_pause_context(self, narrator_text: str) -> str:
         """Detect if this NARRATOR line should trigger a pause"""
-        if narrator_text.strip().endswith(':'):
+        if ':' in narrator_text.strip()[-3:]:
             return "explicit_pause"
         return "dialogue"
 
@@ -238,8 +238,8 @@ class AudioProcessor:
                 context = "dialogue"
                 pause_duration = 1.0
                 
-                # Check if dialogue ends with colon for pedagogical pause
-                if dialogue.strip().endswith(':'):
+                # Check if dialogue ends with colon (handle any punctuation before colon)
+                if len(dialogue.strip()) >= 1 and ':' in dialogue.strip()[-3:]:
                     context = "explicit_pause"
                     
                     if speaker == "NARRATOR":
@@ -293,7 +293,7 @@ class AudioProcessor:
         # Pause debug analysis
         logger.info("=== PAUSE DEBUG ANALYSIS ===")
         for i, line in enumerate(lines):
-            if line['text'].strip().endswith(':'):
+            if ':' in line['text'].strip()[-3:]:
                 logger.info(f"{line['speaker']} COLON at position {i+1}: '{line['text'][:50]}...' -> {line['pause_duration']}s pause")
         logger.info("=== END PAUSE DEBUG ===")
         
