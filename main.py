@@ -315,7 +315,7 @@ class AudioProcessor:
         
         data = {
             "text": text,
-            "model_id": "eleven_turbo_v2_5",
+            "model_id": "eleven_multilingual_v2",
             "voice_settings": {
                 "stability": voice_config['stability'],
                 "similarity_boost": voice_config['similarity_boost'],
