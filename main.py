@@ -67,19 +67,22 @@ VOICE_CONFIG = {
         "voice_id": "L0Dsvb3SLTyegXwtm47J",
         "stability": 0.30,
         "similarity_boost": 0.50,
-        "style": 0.15
+        "style": 0.15,
+        "language": "english"
     },
     "Balasz": {
         "voice_id": "3T7ttZm72GpMThZ8XPZP", 
         "stability": 0.60,
         "similarity_boost": 0.70,
-        "style": 0.15
+        "style": 0.15,
+        "language": "hungarian"
     },
     "Aggie": {
         "voice_id": "xjlfQQ3ynqiEyRpArrT8",
         "stability": 0.60,
         "similarity_boost": 0.70,
-        "style": 0.15
+        "style": 0.15,
+        "language": "hungarian"
     }
 }
 
@@ -301,7 +304,7 @@ class AudioProcessor:
         return lines
 
     def call_elevenlabs_api(self, text: str, voice_config: Dict) -> bytes:
-        """Make API call to ElevenLabs with improved settings"""
+        """Make API call to ElevenLabs with language-specific settings"""
         # Diagnostic logging
         logger.info(f"ElevenLabs input text: {text[:150]}")
         
@@ -322,6 +325,11 @@ class AudioProcessor:
                 "style": voice_config['style']
             }
         }
+        
+        # Add language code only for Hungarian speakers
+        if voice_config.get('language') == 'hungarian':
+            data["language_code"] = "hun"
+            logger.info("Using Hungarian language code for this speaker")
         
         response = requests.post(url, json=data, headers=headers, timeout=60)
         
