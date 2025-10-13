@@ -61,25 +61,22 @@ except ValueError as e:
     logger.error("Make sure all environment variables are set in Railway dashboard")
     raise
 
-# Voice Configuration
+# Voice Configuration - V3 Compatible Settings
 VOICE_CONFIG = {
     "NARRATOR": {
         "voice_id": "L0Dsvb3SLTyegXwtm47J",
-        "stability": 0.30,
-        "similarity_boost": 0.50,
-        "style": 0.15
+        "stability": 0.5,
+        "similarity_boost": 0.50
     },
     "Balasz": {
         "voice_id": "3T7ttZm72GpMThZ8XPZP", 
-        "stability": 0.60,
-        "similarity_boost": 0.70,
-        "style": 0.15
+        "stability": 0.5,
+        "similarity_boost": 0.70
     },
     "Aggie": {
         "voice_id": "xjlfQQ3ynqiEyRpArrT8",
-        "stability": 0.60,
-        "similarity_boost": 0.70,
-        "style": 0.15
+        "stability": 0.5,
+        "similarity_boost": 0.70
     }
 }
 
@@ -301,7 +298,7 @@ class AudioProcessor:
         return lines
 
     def call_elevenlabs_api(self, text: str, voice_config: Dict) -> bytes:
-        """Make API call to ElevenLabs with improved settings"""
+        """Make API call to ElevenLabs with v3-compatible settings"""
         # Diagnostic logging
         logger.info(f"ElevenLabs input text: {text[:150]}")
         
@@ -318,8 +315,7 @@ class AudioProcessor:
             "model_id": "eleven_v3",
             "voice_settings": {
                 "stability": voice_config['stability'],
-                "similarity_boost": voice_config['similarity_boost'],
-                "style": voice_config['style']
+                "similarity_boost": voice_config['similarity_boost']
             }
         }
         
@@ -734,7 +730,7 @@ def health_check():
         return jsonify({
             "status": "healthy", 
             "config": config_status,
-            "message": "Secure GetTalkin Audio Processor running"
+            "message": "Secure GetTalkin Audio Processor running with Eleven v3"
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -768,7 +764,7 @@ def add_pronunciation_fix():
 
 if __name__ == '__main__':
     try:
-        logger.info("Starting GetTalkin Audio Processor (Secure Version)")
+        logger.info("Starting GetTalkin Audio Processor with Eleven v3")
         logger.info("All secrets loaded from environment variables")
         app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=False)
     finally:
