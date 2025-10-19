@@ -144,13 +144,16 @@ class AudioProcessor:
                 
         return 1.0
 
-    def generate_ssml(self, speaker: str, text: str) -> str:
-        """Generate SSML markup - minimal for narrator, raw for Hungarian speakers"""
+    def generate_ssml(self, speaker: str, text: str) -> Tuple[str, Optional[str]]:
+        """Generate SSML markup - minimal for narrator, raw for Hungarian speakers
+        Returns: (processed_text, language_code)"""
         if speaker in ["Balasz", "Aggie"]:
+            # Hungarian speakers: use Hungarian language code, apply pronunciation fixes
             text = self.apply_pronunciation_fixes(text)
-            return text
+            return text, "hu"
         
         if speaker == "NARRATOR":
+            # Narrator: no language code (auto-detection for mixed English/Hungarian)
             ssml = '<speak>'
             
             if text.strip().endswith('?'):
@@ -158,9 +161,9 @@ class AudioProcessor:
             
             ssml += f'<prosody rate="0.95">{text}</prosody>'
             ssml += '</speak>'
-            return ssml
+            return ssml, None
         
-        return text
+        return text, None
 
     def standardize_script_formatting(self, file_content: str) -> str:
         """Clean only formatting issues that break parsing, preserve text integrity"""
@@ -300,10 +303,14 @@ class AudioProcessor:
         
         return lines
 
-    def call_elevenlabs_api(self, text: str, voice_config: Dict) -> bytes:
-        """Make API call to ElevenLabs with improved settings"""
+    def call_elevenlabs_api(self, text: str, voice_config: Dict, language_code: Optional[str] = None) -> bytes:
+        """Make API call to ElevenLabs with improved settings and optional language hint"""
         # Diagnostic logging
         logger.info(f"ElevenLabs input text: {text[:150]}")
+        if language_code:
+            logger.info(f"Language code: {language_code}")
+        else:
+            logger.info("Language code: auto-detect")
         
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_config['voice_id']}"
         
@@ -322,6 +329,10 @@ class AudioProcessor:
                 "style": voice_config['style']
             }
         }
+        
+        # Add language_code only if provided
+        if language_code:
+            data["language_code"] = language_code
         
         response = requests.post(url, json=data, headers=headers, timeout=60)
         
@@ -391,11 +402,11 @@ class AudioProcessor:
             
             logger.info(f"Processing segment {i+1}: {speaker} - {context} - pause: {pause_duration}s")
             
-            ssml_text = self.generate_ssml(speaker, text)
+            ssml_text, language_code = self.generate_ssml(speaker, text)
             voice_config = VOICE_CONFIG.get(speaker, VOICE_CONFIG["NARRATOR"])
             
             try:
-                audio_bytes = self.call_elevenlabs_api(ssml_text, voice_config)
+                audio_bytes = self.call_elevenlabs_api(ssml_text, voice_config, language_code)
                 audio_segment = self.bytes_to_audio_segment(audio_bytes)
                 audio_segments.append(audio_segment)
                 
@@ -442,11 +453,11 @@ class AudioProcessor:
         return vocabulary
 
     def generate_vocabulary_audio(self, word: str) -> bytes:
-        """Generate audio for single vocabulary word"""
+        """Generate audio for single vocabulary word with Hungarian language hint"""
         corrected_word = self.apply_pronunciation_fixes(word)
         voice_config = VOICE_CONFIG["Balasz"]
         ssml_text = f'<speak><prosody rate="0.8">{corrected_word}</prosody></speak>'
-        return self.call_elevenlabs_api(ssml_text, voice_config)
+        return self.call_elevenlabs_api(ssml_text, voice_config, language_code="hu")
 
     def sanitize_filename(self, word: str) -> str:
         """Sanitize Hungarian words for safe file naming"""
@@ -734,7 +745,7 @@ def health_check():
         return jsonify({
             "status": "healthy", 
             "config": config_status,
-            "message": "Secure GetTalkin Audio Processor running with Turbo v2.5"
+            "message": "Secure GetTalkin Audio Processor running with Turbo v2.5 and Hungarian language support"
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -768,7 +779,7 @@ def add_pronunciation_fix():
 
 if __name__ == '__main__':
     try:
-        logger.info("Starting GetTalkin Audio Processor with Turbo v2.5")
+        logger.info("Starting GetTalkin Audio Processor with Turbo v2.5 and Hungarian language support")
         logger.info("All secrets loaded from environment variables")
         app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=False)
     finally:
