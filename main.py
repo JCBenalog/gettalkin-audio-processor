@@ -18,14 +18,15 @@ from pydub.generators import Sine
 import tempfile
 import base64
 
-# Google Cloud Speech-to-Text import
+# Google Cloud Speech-to-Text and Storage imports
 try:
     from google.cloud import speech_v1p1beta1 as speech
+    from google.cloud import storage
     from google.oauth2 import service_account
     GOOGLE_CLOUD_AVAILABLE = True
 except ImportError:
     GOOGLE_CLOUD_AVAILABLE = False
-    logging.warning("Google Cloud Speech-to-Text not available - transcript generation will be disabled")
+    logging.warning("Google Cloud libraries not available - transcript generation will be disabled")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -45,7 +46,8 @@ def load_config():
         'NOTIFICATION_EMAIL': os.getenv('NOTIFICATION_EMAIL'),
         # Google Cloud credentials (optional for transcript generation)
         'GOOGLE_CLOUD_PROJECT_ID': os.getenv('GOOGLE_CLOUD_PROJECT_ID'),
-        'GOOGLE_APPLICATION_CREDENTIALS_JSON': os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
+        'GOOGLE_APPLICATION_CREDENTIALS_JSON': os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON'),
+        'GOOGLE_CLOUD_STORAGE_BUCKET': os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET', 'gettalkin-temp-audio')
     }
     
     # Validate required environment variables (Google Cloud is optional)
@@ -62,6 +64,7 @@ def load_config():
         logger.warning("Google Cloud credentials not set - transcript generation will be disabled")
     else:
         logger.info("Google Cloud credentials loaded - transcript generation enabled")
+        logger.info(f"Using GCS bucket: {config.get('GOOGLE_CLOUD_STORAGE_BUCKET')}")
     
     logger.info("All required environment variables loaded successfully")
     return config
@@ -76,6 +79,7 @@ try:
     NOTIFICATION_EMAIL = config['NOTIFICATION_EMAIL']
     GOOGLE_CLOUD_PROJECT_ID = config.get('GOOGLE_CLOUD_PROJECT_ID')
     GOOGLE_APPLICATION_CREDENTIALS_JSON = config.get('GOOGLE_APPLICATION_CREDENTIALS_JSON')
+    GOOGLE_CLOUD_STORAGE_BUCKET = config.get('GOOGLE_CLOUD_STORAGE_BUCKET')
     
     logger.info("Secure configuration loaded")
     logger.info(f"ElevenLabs Key: {ELEVENLABS_API_KEY[:6]}...")
@@ -663,7 +667,7 @@ def generate_transcript():
         if not GOOGLE_CLOUD_AVAILABLE:
             return jsonify({
                 "status": "error",
-                "message": "Google Cloud Speech-to-Text library not installed"
+                "message": "Google Cloud libraries not installed"
             }), 500
         
         # Check if credentials are configured
@@ -701,13 +705,30 @@ def generate_transcript():
         audio_content = audio_response.content
         logger.info(f"Downloaded {len(audio_content) / (1024*1024):.2f} MB audio file")
         
-        # Initialize Google Cloud Speech client with credentials
+        # Initialize Google Cloud clients with credentials
         credentials_dict = json.loads(GOOGLE_APPLICATION_CREDENTIALS_JSON)
         credentials = service_account.Credentials.from_service_account_info(credentials_dict)
-        client = speech.SpeechClient(credentials=credentials)
         
-        # Prepare audio for Google API
-        audio = speech.RecognitionAudio(content=audio_content)
+        # Upload audio to Google Cloud Storage (temporary)
+        storage_client = storage.Client(credentials=credentials, project=GOOGLE_CLOUD_PROJECT_ID)
+        bucket = storage_client.bucket(GOOGLE_CLOUD_STORAGE_BUCKET)
+        
+        # Create unique filename for temporary storage
+        temp_filename = f"temp-audio-{lesson_id}-{uuid.uuid4()}.mp3"
+        blob = bucket.blob(temp_filename)
+        
+        logger.info(f"Uploading audio to GCS bucket: {GOOGLE_CLOUD_STORAGE_BUCKET}/{temp_filename}")
+        blob.upload_from_string(audio_content, content_type='audio/mpeg')
+        
+        # Construct GCS URI
+        gcs_uri = f"gs://{GOOGLE_CLOUD_STORAGE_BUCKET}/{temp_filename}"
+        logger.info(f"Audio uploaded to: {gcs_uri}")
+        
+        # Initialize Speech-to-Text client
+        speech_client = speech.SpeechClient(credentials=credentials)
+        
+        # Prepare audio for Google API using GCS URI
+        audio = speech.RecognitionAudio(uri=gcs_uri)
         
         # Configure recognition
         config = speech.RecognitionConfig(
@@ -723,8 +744,13 @@ def generate_transcript():
         logger.info("This may take 3-5 minutes for a typical lesson...")
         
         # Use long_running_recognize for files longer than 1 minute
-        operation = client.long_running_recognize(config=config, audio=audio)
+        operation = speech_client.long_running_recognize(config=config, audio=audio)
         response = operation.result(timeout=600)
+        
+        # Delete temporary audio file from GCS
+        logger.info("Deleting temporary audio from GCS...")
+        blob.delete()
+        logger.info("Temporary audio deleted")
         
         # Extract word-level timestamps
         word_timings = []
@@ -752,6 +778,15 @@ def generate_transcript():
         
     except Exception as e:
         logger.error(f"Failed to generate transcript: {e}")
+        
+        # Attempt to clean up temporary file if it exists
+        try:
+            if 'blob' in locals() and blob.exists():
+                blob.delete()
+                logger.info("Cleaned up temporary audio file after error")
+        except Exception as cleanup_error:
+            logger.warning(f"Failed to cleanup temporary file: {cleanup_error}")
+        
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
@@ -765,6 +800,7 @@ def health_check():
             "daily_usage": processor.daily_usage,
             "max_daily_lessons": processor.max_daily_lessons,
             "google_cloud_configured": bool(GOOGLE_CLOUD_PROJECT_ID and GOOGLE_APPLICATION_CREDENTIALS_JSON),
+            "google_cloud_storage_bucket": GOOGLE_CLOUD_STORAGE_BUCKET,
             "transcript_generation_available": GOOGLE_CLOUD_AVAILABLE and bool(GOOGLE_CLOUD_PROJECT_ID)
         }
         
