@@ -661,20 +661,23 @@ def process_vocabulary_file(file_name: str, file_content: str) -> bool:
 
 @app.route('/generate-transcript', methods=['POST'])
 def generate_transcript():
-    """Generate word-level transcript for a lesson using Google Cloud Speech-to-Text"""
+    """
+    Generate word-level transcript and save directly to Supabase database.
+    This implements Option B: auto-save with manual editing capability.
+    """
     try:
         # Check if Google Cloud is available
         if not GOOGLE_CLOUD_AVAILABLE:
             return jsonify({
                 "status": "error",
-                "message": "Google Cloud libraries not installed"
+                "message": "Google Cloud libraries not installed. Run: pip install google-cloud-speech google-cloud-storage"
             }), 500
         
         # Check if credentials are configured
         if not GOOGLE_CLOUD_PROJECT_ID or not GOOGLE_APPLICATION_CREDENTIALS_JSON:
             return jsonify({
                 "status": "error",
-                "message": "Google Cloud credentials not configured in environment variables"
+                "message": "Google Cloud credentials not configured. Set GOOGLE_CLOUD_PROJECT_ID and GOOGLE_APPLICATION_CREDENTIALS_JSON in Railway environment variables."
             }), 500
         
         # Get lesson_id from request
@@ -752,28 +755,74 @@ def generate_transcript():
         blob.delete()
         logger.info("Temporary audio deleted")
         
-        # Extract word-level timestamps
+        # Extract word-level timestamps with edge case fixes
         word_timings = []
         word_index = 0
         
         for result in response.results:
             alternative = result.alternatives[0]
             for word_info in alternative.words:
+                start_time = word_info.start_time.total_seconds()
+                end_time = word_info.end_time.total_seconds()
+                
+                # FIX EDGE CASE 1: Identical timestamps (Google bug for very short words)
+                if start_time == end_time:
+                    end_time = start_time + 0.01  # Add 10ms buffer
+                    logger.debug(f"Fixed identical timestamp for word: {word_info.word}")
+                
+                # FIX EDGE CASE 2: Keep apostrophes but log them
+                word_text = word_info.word
+                if "'" in word_text or '"' in word_text:
+                    logger.debug(f"Word contains quotes/apostrophes: {word_text}")
+                
                 word_timings.append({
                     "word_index": word_index,
-                    "word_text": word_info.word,
-                    "start_time": word_info.start_time.total_seconds(),
-                    "end_time": word_info.end_time.total_seconds()
+                    "word_text": word_text,
+                    "start_time": start_time,
+                    "end_time": end_time
                 })
                 word_index += 1
         
         logger.info(f"Successfully generated transcript with {len(word_timings)} words")
         
+        # OPTION B IMPLEMENTATION: Save directly to database
+        logger.info("Saving transcript to dialogue_word_timings table...")
+        
+        # Delete existing transcript for this lesson (if re-generating)
+        try:
+            supabase.table('dialogue_word_timings').delete().eq('lesson_id', lesson_id).execute()
+            logger.info("Cleared existing transcript data")
+        except Exception as e:
+            logger.warning(f"No existing transcript to clear: {e}")
+        
+        # Prepare records for batch insert
+        db_records = []
+        for word_timing in word_timings:
+            db_records.append({
+                'id': str(uuid.uuid4()),
+                'lesson_id': lesson_id,
+                'word_index': word_timing['word_index'],
+                'word_text': word_timing['word_text'],
+                'start_time': word_timing['start_time'],
+                'end_time': word_timing['end_time'],
+                'created_at': datetime.now().isoformat()
+            })
+        
+        # Insert in batches (Supabase has limits on batch size)
+        batch_size = 100
+        for i in range(0, len(db_records), batch_size):
+            batch = db_records[i:i + batch_size]
+            supabase.table('dialogue_word_timings').insert(batch).execute()
+            logger.info(f"Inserted batch {i//batch_size + 1}/{(len(db_records) + batch_size - 1)//batch_size}")
+        
+        logger.info(f"Successfully saved {len(word_timings)} words to database")
+        
         return jsonify({
             "status": "success",
-            "message": f"Generated transcript with {len(word_timings)} words",
+            "message": f"Generated and saved transcript with {len(word_timings)} words",
             "word_count": len(word_timings),
-            "word_timings": word_timings
+            "lesson_id": lesson_id,
+            "saved_to_database": True
         })
         
     except Exception as e:
