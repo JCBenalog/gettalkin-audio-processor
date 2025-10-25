@@ -864,26 +864,25 @@ def generate_transcript():
         # Prepare audio for Google API using GCS URI
         audio = speech.RecognitionAudio(uri=gcs_uri)
         
-        # Configure recognition with automatic language detection and speaker diarization
+        # Configure recognition with speaker diarization
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.MP3,
             sample_rate_hertz=48000,
+            language_code="hu-HU",  # Primary language
+            alternative_language_codes=["en-US"],  # For narrator's English
             enable_word_time_offsets=True,
             enable_automatic_punctuation=True,
             model="latest_long",
-            # Enable automatic language detection
-            enable_automatic_language_detection=True,
-            language_codes=["hu-HU", "en-US"],  # Hungarian primary, English secondary
-            # Enable speaker diarization
+            # Enable speaker diarization (this is the key addition)
             diarization_config=speech.SpeakerDiarizationConfig(
                 enable_speaker_diarization=True,
-                min_speaker_count=2,  # At least 2 (narrator + 1 Hungarian speaker)
-                max_speaker_count=3,  # Maximum 3 (narrator + Balász + Aggie)
+                min_speaker_count=2,
+                max_speaker_count=3,
             )
         )
         
         logger.info("Sending audio to Google Cloud Speech-to-Text API...")
-        logger.info("Configuration: Automatic language detection + Speaker diarization enabled")
+        logger.info("Configuration: Multi-language + Speaker diarization enabled")
         logger.info("This may take 3-5 minutes for a typical lesson...")
         
         # Use long_running_recognize for files longer than 1 minute
