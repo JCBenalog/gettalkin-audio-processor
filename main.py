@@ -733,11 +733,12 @@ def generate_transcript():
         # Prepare audio for Google API using GCS URI
         audio = speech.RecognitionAudio(uri=gcs_uri)
         
-        # Configure recognition
+        # Configure recognition for multi-language (English narrator + Hungarian speakers)
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.MP3,
             sample_rate_hertz=48000,
-            language_code="hu-HU",
+            language_code="hu-HU",  # Primary language (Hungarian)
+            alternative_language_codes=["en-US"],  # Secondary language (English narrator)
             enable_word_time_offsets=True,
             enable_automatic_punctuation=True,
             model="latest_long"
