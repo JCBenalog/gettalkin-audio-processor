@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import requests
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from supabase import create_client, Client
 import logging
 from pathlib import Path
@@ -31,6 +32,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 # SECURE CONFIGURATION - Load from environment variables
 def load_config():
