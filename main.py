@@ -406,19 +406,18 @@ class AudioProcessor:
         Returns: lesson_id"""
         try:
             # Create lesson record
-            lesson_record = {
-                "id": str(uuid.uuid4()),
-                "lesson_number": lesson_data['lesson_number'],
-                "title": lesson_data['title'],
-                "description": lesson_data['description'],
-                "audio_file_path": audio_url,
-                "duration_seconds": lesson_data['duration_seconds'],
-                "line_count": lesson_data['line_count'],
-                "created_by": USER_ID,
-                "is_published": False,
-                "created_at": datetime.now().isoformat()
-            }
             
+            lesson_record = {
+    "id": str(uuid.uuid4()),
+    "lesson_number": lesson_data['lesson_number'],
+    "title": lesson_data['title'],
+    "description": lesson_data['description'],
+    "audio_url": audio_url,  # CORRECT NAME
+    "duration": int(lesson_data['duration_seconds']),  # CORRECT NAME + convert to int
+    "created_by": USER_ID,
+    "is_published": False,
+    "created_at": datetime.now().isoformat()
+}
             logger.info("Saving lesson to database...")
             lesson_response = supabase.table('lessons').insert(lesson_record).execute()
             lesson_id = lesson_response.data[0]['id']
