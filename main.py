@@ -415,7 +415,7 @@ class AudioProcessor:
     "description": lesson_data['description'],
     "audio_url": audio_url,  # CORRECT NAME
     "duration": int(lesson_data['duration_seconds']),  # CORRECT NAME + convert to int
-    "level": 1,  # Default to beginner level
+    "level": "beginner",  # Default to beginner level
     "created_by": USER_ID,
     "is_published": False,
     "created_at": datetime.now().isoformat()
