@@ -390,7 +390,7 @@ class AudioProcessor:
                 audio_data,
                 file_options={
                     "content-type": content_type,
-                    "upsert": "true"
+                    "upsert": "True"
                 }
             )
             
