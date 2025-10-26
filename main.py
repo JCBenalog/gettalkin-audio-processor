@@ -382,7 +382,7 @@ class AudioProcessor:
     def upload_to_supabase_storage(self, file_path: str, audio_data: bytes, content_type: str = "audio/mpeg") -> str:
         """Upload audio file to Supabase Storage"""
         try:
-            bucket_name = "lesson-audio"  # FIXED: Changed from "lessons" to "lesson-audio"
+            bucket_name = "lesson-audio"
             
             response = supabase.storage.from_(bucket_name).upload(
                 file_path,
@@ -464,6 +464,126 @@ class AudioProcessor:
             logger.warning(f"Failed to cleanup temp files: {e}")
 
 processor = AudioProcessor()
+
+@app.route('/webhook/google-drive', methods=['POST'])
+def webhook_google_drive():
+    """Webhook endpoint for Google Apps Script to trigger lesson processing"""
+    try:
+        logger.info("="*80)
+        logger.info("WEBHOOK CALLED FROM GOOGLE APPS SCRIPT")
+        logger.info("="*80)
+        
+        # Get request data from Google Apps Script
+        data = request.get_json()
+        file_name = data.get('fileName')
+        file_content = data.get('fileContent')
+        file_type = data.get('fileType', 'lesson')
+        timestamp = data.get('timestamp')
+        
+        logger.info(f"Received file: {file_name}")
+        logger.info(f"File type: {file_type}")
+        logger.info(f"Content length: {len(file_content)} characters")
+        logger.info(f"Timestamp: {timestamp}")
+        
+        # Validation
+        if not file_name or not file_content:
+            return jsonify({
+                "status": "error",
+                "message": "Missing fileName or fileContent"
+            }), 400
+        
+        # Extract lesson metadata from filename
+        # Expected format: "Lesson 4 - in the restaurant - FINAL.txt"
+        lesson_number = None
+        title = "Untitled Lesson"
+        
+        # Try to parse lesson number and title from filename
+        import re
+        lesson_match = re.search(r'lesson\s*(\d+)', file_name, re.IGNORECASE)
+        if lesson_match:
+            lesson_number = int(lesson_match.group(1))
+            logger.info(f"Extracted lesson number: {lesson_number}")
+        else:
+            logger.warning(f"Could not extract lesson number from filename: {file_name}")
+            return jsonify({
+                "status": "error",
+                "message": f"Could not extract lesson number from filename: {file_name}. Expected format: 'Lesson 4 - Title.txt'"
+            }), 400
+        
+        # Extract title (everything between lesson number and file extension)
+        title_match = re.search(r'lesson\s*\d+\s*[-–]\s*(.+?)(?:\s*-\s*FINAL)?\.(?:txt|csv|docx)$', file_name, re.IGNORECASE)
+        if title_match:
+            title = title_match.group(1).strip()
+            logger.info(f"Extracted title: {title}")
+        else:
+            # Fallback: use filename without extension
+            title = file_name.rsplit('.', 1)[0].replace(f'Lesson {lesson_number}', '').strip(' -–')
+            logger.info(f"Using fallback title: {title}")
+        
+        # Rate limiting
+        if processor.daily_usage >= processor.max_daily_lessons:
+            return jsonify({
+                "status": "error",
+                "message": f"Daily lesson limit reached ({processor.max_daily_lessons})"
+            }), 429
+        
+        logger.info(f"Processing lesson {lesson_number}: {title}")
+        
+        # Process lesson with timing
+        result = processor.process_lesson_with_timing(
+            lesson_number=lesson_number,
+            title=title,
+            description=f"Processed from {file_name}",
+            csv_content=file_content
+        )
+        
+        # Upload audio
+        audio_filename = f"lesson_{lesson_number}_{title.replace(' ', '_')}.mp3"
+        audio_url = processor.upload_to_supabase_storage(
+            audio_filename,
+            result['audio_data']
+        )
+        
+        # Save to database with line timings
+        lesson_id = processor.save_lesson_to_database(
+            result['lesson_metadata'],
+            audio_url,
+            result['line_timings']
+        )
+        
+        # Increment usage counter
+        processor.daily_usage += 1
+        
+        logger.info("="*80)
+        logger.info(f"WEBHOOK SUCCESS: Lesson {lesson_number} processed")
+        logger.info(f"Lesson ID: {lesson_id}")
+        logger.info("="*80)
+        
+        return jsonify({
+            "status": "success",
+            "success": True,
+            "message": f"Lesson {lesson_number} processed successfully",
+            "lesson_id": lesson_id,
+            "lesson_number": lesson_number,
+            "title": title,
+            "audio_url": audio_url,
+            "duration_seconds": result['duration_seconds'],
+            "line_count": len(result['line_timings']),
+            "line_timings_saved": True
+        })
+        
+    except Exception as e:
+        logger.error("="*80)
+        logger.error(f"WEBHOOK ERROR: {e}")
+        logger.error("="*80)
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        return jsonify({
+            "status": "error",
+            "success": False,
+            "message": str(e)
+        }), 500
 
 @app.route('/process-lesson', methods=['POST'])
 def process_lesson_endpoint():
