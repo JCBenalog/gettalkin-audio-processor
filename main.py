@@ -375,7 +375,8 @@ class AudioProcessor:
                 'lesson_number': lesson_number,
                 'title': title,
                 'description': description,
-                'line_count': len(lines_data)
+                'line_count': len(lines_data),
+                'duration_seconds': final_duration
             }
         }
 
