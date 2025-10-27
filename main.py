@@ -429,12 +429,13 @@ class AudioProcessor:
             logger.info(f"Saving {len(line_timings)} line timings to lesson_transcript table...")
             
             transcript_records = []
-            for timing in line_timings:
+            for i, timing in enumerate(line_timings):
                 transcript_records.append({
                     'id': str(uuid.uuid4()),
                     'lesson_id': lesson_id,
                     'speaker': timing['speaker'],
-                    'line_text': timing['line_text'],
+                    'text_content': timing['line_text'],
+                    'line_number': i + 1,
                     'start_time': timing['start_time'],
                     'end_time': timing['end_time'],
                     'created_at': datetime.now().isoformat()
