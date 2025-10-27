@@ -386,13 +386,9 @@ class AudioProcessor:
             bucket_name = "lesson-audio"
             
             response = supabase.storage.from_(bucket_name).upload(
-                file_path,
-                audio_data,
-                file_options={
-                    "content-type": content_type,
-                    "upsert": "True"
-                }
-            )
+    file_path, audio_bytes, 
+    file_options={"content-type": "audio/mpeg", "upsert": "true"}
+)
             
             public_url = supabase.storage.from_(bucket_name).get_public_url(file_path)
             logger.info(f"Audio uploaded successfully: {public_url}")
