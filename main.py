@@ -390,7 +390,7 @@ class AudioProcessor:
                 audio_data,
                 file_options={
                     "content-type": content_type,
-                    "upsert": "True"
+                    "upsert": "true"
                 }
             )
             
@@ -798,8 +798,8 @@ def generate_transcript():
         storage_client = storage.Client(credentials=credentials, project=GOOGLE_CLOUD_PROJECT_ID)
         bucket = storage_client.bucket(GOOGLE_CLOUD_STORAGE_BUCKET)
         
-        # Create unique filename
-        temp_filename = f"temp_audio_{lesson_id}_{int(datetime.now().timestamp())}.mp3"
+        # Create unique filename for temporary storage
+        temp_filename = f"temp_audio_{lesson_id}_{datetime.now().timestamp()}.mp3"
         blob = bucket.blob(temp_filename)
         
         logger.info(f"Uploading audio to GCS bucket: {GOOGLE_CLOUD_STORAGE_BUCKET}/{temp_filename}")
