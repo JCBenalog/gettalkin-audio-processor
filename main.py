@@ -191,14 +191,16 @@ class AudioProcessor:
 
     def generate_ssml(self, speaker: str, text: str) -> Tuple[str, Optional[str]]:
         """Generate SSML markup - minimal for narrator, raw for Hungarian speakers
-        Returns: (processed_text, language_code)"""
+        
+        Returns:
+            Tuple of (ssml_text, language_hint)
+            language_hint is 'hu' for Hungarian speakers, None for English narrator
+        """
         if speaker in ["Balasz", "Aggie"]:
-            # Hungarian speakers: use Hungarian language code, apply pronunciation fixes
             text = self.apply_pronunciation_fixes(text)
-            return text, "hu"
+            return text, "hu"  # Hungarian language hint
         
         if speaker == "NARRATOR":
-            # Narrator: no language code (auto-detection for mixed English/Hungarian)
             ssml = '<speak>'
             
             if text.strip().endswith('?'):
@@ -206,346 +208,443 @@ class AudioProcessor:
             
             ssml += f'<prosody rate="0.95">{text}</prosody>'
             ssml += '</speak>'
-            return ssml, None
+            return ssml, None  # English (default)
         
         return text, None
 
-    def generate_audio_segment(self, speaker: str, text: str, use_ssml: bool = True) -> Tuple[bytes, float]:
-        """Generate audio for a single text segment using ElevenLabs API
-        Returns: (audio_bytes, duration_seconds)"""
-        voice_config = VOICE_CONFIG.get(speaker, VOICE_CONFIG["NARRATOR"])
+    def standardize_script_formatting(self, file_content: str) -> str:
+        """Clean only formatting issues that break parsing, preserve text integrity"""
         
-        processed_text, language_code = self.generate_ssml(speaker, text) if use_ssml else (text, None)
+        # Normalize quote variants (curly to straight)
+        quote_variants = ['"', '"', '"', '„', '‟']
+        for variant in quote_variants:
+            file_content = file_content.replace(variant, '"')
         
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_config['voice_id']}"
+        # Remove invisible formatting characters
+        file_content = file_content.replace('\ufeff', '')  # BOM
+        file_content = file_content.replace('\u200b', '')  # Zero-width space
+        file_content = file_content.replace('\xa0', ' ')   # Non-breaking space
         
-        headers = {
-            "Accept": "audio/mpeg",
-            "Content-Type": "application/json",
-            "xi-api-key": ELEVENLABS_API_KEY
-        }
+        # Normalize line endings
+        file_content = file_content.replace('\r\n', '\n').replace('\r', '\n')
         
-        payload = {
-            "text": processed_text,
-            "model_id": "eleven_turbo_v2_5",
-            "voice_settings": {
-                "stability": voice_config["stability"],
-                "similarity_boost": voice_config["similarity_boost"],
-                "style": voice_config.get("style", 0.15)
-            }
-        }
-        
-        if language_code:
-            payload["language_code"] = language_code
+        return file_content
+
+    def parse_lesson_script(self, file_content: str) -> List[Dict]:
+        """Parse lesson CSV content with manual parsing to handle nested quotes and commas"""
+        lines = []
         
         try:
-            response = requests.post(url, json=payload, headers=headers)
-            response.raise_for_status()
+            # Diagnostic logging
+            logger.info(f"RAW INPUT (first 300 chars): {repr(file_content[:300])}")
             
-            audio_bytes = response.content
+            # Standardize formatting before parsing
+            file_content = self.standardize_script_formatting(file_content)
             
-            audio_segment = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
-            duration_seconds = len(audio_segment) / 1000.0
+            # Split into lines and process manually
+            content_lines = file_content.strip().split('\n')
             
-            logger.info(f"Generated {speaker} audio: {len(audio_bytes)} bytes, {duration_seconds:.2f}s")
-            return audio_bytes, duration_seconds
+            # Skip header line if present
+            start_index = 0
+            if content_lines[0].lower().startswith('speaker'):
+                start_index = 1
             
-        except requests.exceptions.RequestException as e:
-            logger.error(f"ElevenLabs API error: {e}")
+            for i in range(start_index, len(content_lines)):
+                line = content_lines[i].strip()
+                if not line:
+                    continue
+                
+                # Manual parsing: find first comma that's not inside quotes
+                in_quotes = False
+                comma_index = -1
+                
+                for j, char in enumerate(line):
+                    if char == '"':
+                        in_quotes = not in_quotes
+                    elif char == ',' and not in_quotes:
+                        comma_index = j
+                        break
+                
+                if comma_index == -1:
+                    logger.warning(f"Skipping malformed line (no comma): {line[:50]}")
+                    continue
+                
+                speaker_part = line[:comma_index].strip()
+                text_part = line[comma_index + 1:].strip()
+                
+                # Remove quotes from text_part if present
+                if text_part.startswith('"') and text_part.endswith('"'):
+                    text_part = text_part[1:-1]
+                
+                if speaker_part and text_part:
+                    lines.append({
+                        "speaker": speaker_part,
+                        "text": text_part
+                    })
+                else:
+                    logger.warning(f"Skipping line with empty speaker or text: {line[:50]}")
+            
+            logger.info(f"Successfully parsed {len(lines)} lines from script")
+            return lines
+            
+        except Exception as e:
+            logger.error(f"Failed to parse lesson script: {e}")
+            raise Exception(f"Script parsing error: {str(e)}")
+
+    def generate_audio_segment(self, speaker: str, text: str, language_hint: Optional[str] = None) -> bytes:
+        """Generate audio for a single text segment using ElevenLabs API
+        
+        Args:
+            speaker: Speaker name (NARRATOR, Balasz, Aggie)
+            text: Text to convert to speech
+            language_hint: 'hu' for Hungarian, None for English
+        """
+        try:
+            voice_config = VOICE_CONFIG.get(speaker)
+            if not voice_config:
+                raise Exception(f"Unknown speaker: {speaker}")
+            
+            # Select model based on language
+            if language_hint == "hu":
+                model_id = "eleven_multilingual_v2"  # Better for Hungarian
+                logger.info(f"Using multilingual model for Hungarian speaker: {speaker}")
+            else:
+                model_id = "eleven_turbo_v2_5"  # Faster for English narrator
+                logger.info(f"Using turbo model for English narrator")
+            
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_config['voice_id']}"
+            
+            headers = {
+                "Accept": "audio/mpeg",
+                "Content-Type": "application/json",
+                "xi-api-key": ELEVENLABS_API_KEY
+            }
+            
+            data = {
+                "text": text,
+                "model_id": model_id,
+                "voice_settings": {
+                    "stability": voice_config['stability'],
+                    "similarity_boost": voice_config['similarity_boost'],
+                    "style": voice_config.get('style', 0),
+                    "use_speaker_boost": True
+                }
+            }
+            
+            response = requests.post(url, json=data, headers=headers, timeout=30)
+            
+            if response.status_code != 200:
+                raise Exception(f"ElevenLabs API error: {response.status_code} - {response.text}")
+            
+            return response.content
+            
+        except Exception as e:
+            logger.error(f"Failed to generate audio for '{text[:30]}...': {e}")
             raise
 
-    def get_word_timings_from_audio(self, audio_bytes: bytes, speaker: str, original_text: str) -> List[Dict]:
-        """
-        NEW METHOD: Get word-level timestamps from audio using Google Speech-to-Text
-        Returns list of {word_text, start_time, end_time} relative to this audio segment
-        """
-        if not google_speech_client or not google_storage_client:
-            logger.debug("Google Cloud not available - skipping word-level timestamps for this line")
-            return []
+    def create_silence(self, duration_seconds: float) -> AudioSegment:
+        """Generate silence of specified duration"""
+        return AudioSegment.silent(duration=int(duration_seconds * 1000))
+
+    def process_lesson_with_timing(
+        self, 
+        lesson_number: int, 
+        title: str, 
+        description: str, 
+        csv_content: str
+    ) -> Dict:
+        """Process lesson with line-by-line timing tracking AND word-level timing extraction
         
+        NEW: Now extracts word-level timestamps from audio using Google Cloud Speech-to-Text
+        during audio generation, eliminating need for separate transcript generation endpoint.
+        
+        Returns dict with:
+            - audio_data: Combined MP3 bytes
+            - line_timings: List of {speaker, text, start_time, end_time}
+            - word_timings: List of {word_text, start_time, end_time, speaker}  # NEW
+            - duration_seconds: Total audio duration
+            - lesson_metadata: Dict with lesson info
+        """
         try:
-            # Upload audio to temporary GCS location
+            logger.info(f"Processing lesson {lesson_number}: {title}")
+            
+            # Parse script
+            script_lines = self.parse_lesson_script(csv_content)
+            if not script_lines:
+                raise Exception("No valid script lines found")
+            
+            logger.info(f"Parsed {len(script_lines)} script lines")
+            
+            # Generate audio segments with timing
+            audio_segments = []
+            line_timings = []
+            current_time = 0.0
+            
+            logger.info("Generating audio segments with pedagogical pauses...")
+            
+            for i, line in enumerate(script_lines):
+                speaker = line['speaker']
+                text = line['text']
+                
+                # Determine pause duration
+                pause_context = "dialogue"
+                pause_duration = 1.0
+                
+                if speaker == "NARRATOR":
+                    pause_context = self.detect_pause_context(text)
+                    
+                    if pause_context == "explicit_pause" and i + 1 < len(script_lines):
+                        next_text = script_lines[i + 1]['text']
+                        pause_duration = self.calculate_pedagogical_pause(next_text, pause_context)
+                
+                # Generate SSML with language hint
+                ssml_text, language_hint = self.generate_ssml(speaker, text)
+                
+                # Generate audio
+                audio_bytes = self.generate_audio_segment(speaker, ssml_text, language_hint)
+                audio_segment = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
+                
+                # Record timing for this line
+                line_start = current_time
+                line_end = current_time + (len(audio_segment) / 1000.0)
+                
+                line_timings.append({
+                    "speaker": speaker,
+                    "text": text,
+                    "start_time": line_start,
+                    "end_time": line_end
+                })
+                
+                logger.info(f"Line {i+1}/{len(script_lines)}: {speaker} | {line_start:.2f}s-{line_end:.2f}s | Pause: {pause_duration}s ({pause_context})")
+                
+                # Add audio and pause
+                audio_segments.append(audio_segment)
+                current_time = line_end
+                
+                if i < len(script_lines) - 1:
+                    pause = self.create_silence(pause_duration)
+                    audio_segments.append(pause)
+                    current_time += pause_duration
+            
+            # Combine all segments
+            logger.info("Combining audio segments...")
+            combined_audio = sum(audio_segments[1:], audio_segments[0])
+            
+            # Export to MP3
+            logger.info("Exporting to MP3...")
+            output_buffer = io.BytesIO()
+            combined_audio.export(
+                output_buffer,
+                format="mp3",
+                bitrate="128k",
+                parameters=["-q:a", "2"]
+            )
+            audio_data = output_buffer.getvalue()
+            
+            duration_seconds = len(combined_audio) / 1000.0
+            logger.info(f"Total audio duration: {duration_seconds:.2f} seconds")
+            logger.info(f"Audio size: {len(audio_data) / 1024:.1f} KB")
+            
+            # NEW: Generate word-level timestamps using Google Cloud Speech-to-Text
+            word_timings = []
+            if google_speech_client and google_storage_client:
+                try:
+                    logger.info("Generating word-level timestamps using Google Cloud Speech-to-Text...")
+                    word_timings = self.extract_word_timings_from_audio(
+                        audio_data, 
+                        line_timings
+                    )
+                    logger.info(f"Successfully extracted {len(word_timings)} word-level timestamps")
+                except Exception as e:
+                    logger.warning(f"Failed to generate word-level timestamps: {e}")
+                    logger.warning("Continuing without word-level timestamps")
+            else:
+                logger.info("Google Cloud not configured - skipping word-level timestamp generation")
+            
+            return {
+                'audio_data': audio_data,
+                'line_timings': line_timings,
+                'word_timings': word_timings,  # NEW
+                'duration_seconds': duration_seconds,
+                'lesson_metadata': {
+                    'lesson_number': lesson_number,
+                    'title': title,
+                    'description': description,
+                    'level': 'beginner',
+                    'line_count': len(line_timings),
+                    'word_count': len(word_timings)  # NEW
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to process lesson: {e}")
+            raise
+
+    def extract_word_timings_from_audio(self, audio_data: bytes, line_timings: List[Dict]) -> List[Dict]:
+        """Extract word-level timestamps from audio using Google Cloud Speech-to-Text
+        
+        Args:
+            audio_data: MP3 audio bytes
+            line_timings: List of line timings for speaker attribution
+            
+        Returns:
+            List of {word_text, start_time, end_time, speaker}
+        """
+        try:
+            # Upload audio to GCS temporarily
+            logger.info("Uploading audio to Google Cloud Storage...")
             bucket = google_storage_client.bucket(GOOGLE_CLOUD_STORAGE_BUCKET)
-            temp_filename = f"temp_line_{uuid.uuid4().hex}.mp3"
+            temp_filename = f"temp_audio_{uuid.uuid4()}.mp3"
             blob = bucket.blob(temp_filename)
-            blob.upload_from_string(audio_bytes, content_type='audio/mpeg')
+            blob.upload_from_string(audio_data, content_type='audio/mpeg')
             
             gcs_uri = f"gs://{GOOGLE_CLOUD_STORAGE_BUCKET}/{temp_filename}"
+            logger.info(f"Audio uploaded to: {gcs_uri}")
             
             # Configure Speech-to-Text
             audio = speech.RecognitionAudio(uri=gcs_uri)
-            
-            # Determine language for this speaker
-            language_code = "hu-HU" if speaker in ["Balasz", "Aggie"] else "en-US"
-            
             config = speech.RecognitionConfig(
                 encoding=speech.RecognitionConfig.AudioEncoding.MP3,
                 sample_rate_hertz=48000,
-                language_code=language_code,
+                language_code="hu-HU",
+                alternative_language_codes=["en-US"],
                 enable_word_time_offsets=True,
                 enable_automatic_punctuation=True,
-                model="latest_short"  # Use short model for individual lines
+                model="latest_long",
+                diarization_config=speech.SpeakerDiarizationConfig(
+                    enable_speaker_diarization=True,
+                    min_speaker_count=2,
+                    max_speaker_count=3,
+                )
             )
             
-            # Recognize speech (synchronous for short audio)
-            response = google_speech_client.recognize(config=config, audio=audio)
+            logger.info("Processing audio with Google Cloud Speech-to-Text...")
+            logger.info("This may take 3-5 minutes...")
+            
+            # Process audio
+            operation = google_speech_client.long_running_recognize(config=config, audio=audio)
+            response = operation.result(timeout=600)
             
             # Clean up temporary file
             blob.delete()
+            logger.info("Temporary audio deleted from GCS")
             
-            # Extract word timings
+            # Extract word timings with speaker attribution
             word_timings = []
+            word_index = 0
+            
             for result in response.results:
                 alternative = result.alternatives[0]
+                
                 for word_info in alternative.words:
                     start_time = word_info.start_time.total_seconds()
                     end_time = word_info.end_time.total_seconds()
                     
-                    # Fix identical timestamps (Google bug)
+                    # Fix identical timestamps
                     if start_time == end_time:
                         end_time = start_time + 0.01
                     
+                    # Attribute speaker based on line timings
+                    speaker = self.get_speaker_for_word(start_time, line_timings)
+                    
                     word_timings.append({
+                        "word_index": word_index,
                         "word_text": word_info.word,
                         "start_time": start_time,
-                        "end_time": end_time
+                        "end_time": end_time,
+                        "speaker": speaker
                     })
+                    word_index += 1
             
-            logger.info(f"  ✓ Extracted {len(word_timings)} word timings for line")
+            logger.info(f"Extracted {len(word_timings)} word-level timestamps")
             return word_timings
             
         except Exception as e:
-            logger.warning(f"Failed to get word timings for line: {e}")
+            logger.error(f"Failed to extract word timings: {e}")
+            # Don't fail the entire lesson processing if word timing extraction fails
             return []
 
-    def create_silence(self, duration_seconds: float) -> bytes:
-        """Generate silence audio segment"""
-        silence = AudioSegment.silent(duration=int(duration_seconds * 1000))
-        buffer = io.BytesIO()
-        silence.export(buffer, format="mp3", bitrate="128k")
-        return buffer.getvalue()
+    def get_speaker_for_word(self, word_time: float, line_timings: List[Dict]) -> str:
+        """Determine which speaker is speaking at a given time based on line timings"""
+        for line in line_timings:
+            if line['start_time'] <= word_time <= line['end_time']:
+                return line['speaker']
+        return "Unknown"
 
-    def standardize_script_formatting(self, csv_content: str) -> str:
-        """Standardize script formatting to prevent parsing errors"""
-        csv_content = csv_content.replace('"', '"').replace('"', '"')
-        csv_content = csv_content.replace(''', "'").replace(''', "'")
-        csv_content = ''.join(char for char in csv_content if unicodedata.category(char)[0] != 'C' or char in '\n\r\t')
-        return csv_content
-
-    def parse_lesson_script(self, csv_content: str) -> List[Dict]:
-        """Parse lesson script CSV with robust error handling"""
-        csv_content = self.standardize_script_formatting(csv_content)
-        
-        lines_data = []
-        csv_reader = csv.DictReader(io.StringIO(csv_content))
-        
-        for row_num, row in enumerate(csv_reader, start=2):
-            try:
-                speaker = row.get('speaker', '').strip()
-                line_text = row.get('line', '').strip()
-                
-                if not speaker or not line_text:
-                    logger.warning(f"Row {row_num}: Missing speaker or line text")
-                    continue
-                
-                lines_data.append({
-                    'speaker': speaker,
-                    'line': line_text,
-                    'row_num': row_num
-                })
-                
-            except Exception as e:
-                logger.error(f"Error parsing row {row_num}: {e}")
-                continue
-        
-        logger.info(f"Successfully parsed {len(lines_data)} dialogue lines")
-        return lines_data
-
-    def process_lesson_with_timing(self, lesson_number: int, title: str, description: str, csv_content: str) -> Dict:
-        """
-        MODIFIED METHOD: Process lesson and track BOTH line timing AND word timing
-        Returns: Dict with audio_data, lesson_metadata, line_timings, and word_timings
-        """
-        
-        logger.info("="*80)
-        logger.info(f"PROCESSING LESSON {lesson_number}: {title}")
-        logger.info("WITH WORD-LEVEL TIMESTAMP GENERATION" if google_speech_client else "WITHOUT WORD-LEVEL TIMESTAMPS (Google Cloud not configured)")
-        logger.info("="*80)
-        
-        # Parse script
-        lines_data = self.parse_lesson_script(csv_content)
-        if not lines_data:
-            raise ValueError("No valid dialogue lines found in script")
-        
-        logger.info(f"Processing {len(lines_data)} dialogue lines with timing tracking...")
-        
-        # Initialize timing tracking
-        cumulative_time = 0.0
-        line_timings = []
-        all_word_timings = []  # NEW: Store word timings across all lines
-        audio_segments = []
-        
-        # Process each line and track timing
-        for i, line_data in enumerate(lines_data):
-            speaker = line_data['speaker']
-            line_text = line_data['line']
-            
-            # Calculate start time (before generating audio)
-            line_start_time = cumulative_time
-            
-            logger.info(f"\n[Line {i+1}/{len(lines_data)}] {speaker}: {line_text[:50]}...")
-            
-            # Generate audio segment
-            audio_bytes, duration = self.generate_audio_segment(speaker, line_text)
-            audio_segments.append(audio_bytes)
-            
-            # NEW: Get word-level timestamps for this line (if Google Cloud available)
-            word_timings = self.get_word_timings_from_audio(audio_bytes, speaker, line_text)
-            
-            # NEW: Adjust word timestamps by cumulative offset and add speaker/line info
-            for word_timing in word_timings:
-                all_word_timings.append({
-                    "word_text": word_timing["word_text"],
-                    "start_time": cumulative_time + word_timing["start_time"],
-                    "end_time": cumulative_time + word_timing["end_time"],
-                    "speaker": speaker,
-                    "line_index": i + 1
-                })
-            
-            # Update cumulative time with actual audio duration
-            cumulative_time += duration
-            line_end_time = cumulative_time
-            
-            # Calculate pause (if needed)
-            pause_duration = 1.0  # Default
-            if speaker == "NARRATOR":
-                context = self.detect_pause_context(line_text)
-                if context == "explicit_pause" and i + 1 < len(lines_data):
-                    following_text = lines_data[i + 1]['line']
-                    pause_duration = self.calculate_pedagogical_pause(following_text, context)
-                    logger.info(f"  └─ Pedagogical pause: {pause_duration}s (following text: {len(following_text.split())} words)")
-            
-            # Add pause
-            if pause_duration > 0:
-                silence = self.create_silence(pause_duration)
-                audio_segments.append(silence)
-                cumulative_time += pause_duration
-            
-            # Save line timing
-            line_timings.append({
-                'speaker': speaker,
-                'line_text': line_text,
-                'start_time': line_start_time,
-                'end_time': line_end_time
-            })
-            
-            logger.info(f"  ✓ Audio: {duration:.2f}s | Start: {line_start_time:.2f}s | End: {line_end_time:.2f}s | Pause: {pause_duration:.2f}s")
-        
-        # Combine all audio segments
-        logger.info("\n" + "="*80)
-        logger.info("COMBINING AUDIO SEGMENTS...")
-        logger.info("="*80)
-        
-        combined_audio = AudioSegment.empty()
-        for audio_bytes in audio_segments:
-            segment = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
-            combined_audio += segment
-        
-        # Export final audio
-        buffer = io.BytesIO()
-        combined_audio.export(buffer, format="mp3", bitrate="128k")
-        final_audio_data = buffer.getvalue()
-        
-        final_duration = len(combined_audio) / 1000.0
-        
-        logger.info("="*80)
-        logger.info(f"LESSON COMPLETE: {len(lines_data)} lines processed")
-        logger.info(f"Total duration: {final_duration:.2f}s ({final_duration/60:.1f} minutes)")
-        logger.info(f"Line timings tracked: {len(line_timings)} entries")
-        logger.info(f"Word timings tracked: {len(all_word_timings)} words")  # NEW
-        logger.info("="*80)
-        
-        return {
-            'audio_data': final_audio_data,
-            'duration_seconds': final_duration,
-            'line_timings': line_timings,
-            'word_timings': all_word_timings,  # NEW: Return word timings
-            'lesson_metadata': {
-                'lesson_number': lesson_number,
-                'title': title,
-                'description': description,
-                'line_count': len(lines_data),
-                'duration_seconds': final_duration
-            }
-        }
-
-    def upload_to_supabase_storage(self, file_path: str, audio_data: bytes, content_type: str = "audio/mpeg") -> str:
-        """Upload audio file to Supabase Storage"""
+    def upload_to_supabase_storage(self, file_path: str, file_data: bytes, content_type: str = "audio/mpeg") -> str:
+        """Upload file to Supabase Storage"""
         try:
-            bucket_name = "lesson-audio"
+            logger.info(f"Uploading to Supabase Storage: {file_path}")
             
-            response = supabase.storage.from_(bucket_name).upload(
+            response = supabase.storage.from_('lesson-audio').upload(
                 file_path,
-                audio_data,
-                file_options={
-                    "content-type": content_type,
-                    "upsert": "true"
-                }
+                file_data,
+                file_options={"content-type": content_type}
             )
             
-            public_url = supabase.storage.from_(bucket_name).get_public_url(file_path)
-            logger.info(f"Audio uploaded successfully: {public_url}")
+            public_url = supabase.storage.from_('lesson-audio').get_public_url(file_path)
+            logger.info(f"File uploaded successfully: {public_url}")
+            
             return public_url
             
         except Exception as e:
             logger.error(f"Failed to upload to Supabase Storage: {e}")
             raise
 
-    def save_lesson_to_database(self, lesson_data: Dict, audio_url: str, line_timings: List[Dict], word_timings: List[Dict]) -> str:
-        """
-        MODIFIED METHOD: Save lesson metadata, line timings, AND word timings to Supabase
-        Returns: lesson_id
+    def save_lesson_to_database(
+        self, 
+        lesson_metadata: Dict, 
+        audio_url: str,
+        line_timings: List[Dict],
+        word_timings: List[Dict]  # NEW parameter
+    ) -> str:
+        """Save lesson metadata and timing information to database
+        
+        NEW: Now also saves word-level timings to dialogue_word_timings table
         """
         try:
+            logger.info("Saving lesson to database...")
+            
             # Create lesson record
-            lesson_record = {
-                "id": str(uuid.uuid4()),
-                "lesson_number": lesson_data['lesson_number'],
-                "title": lesson_data['title'],
-                "description": lesson_data['description'],
-                "audio_url": audio_url,
-                "duration": int(lesson_data['duration_seconds']),
-                "level": "beginner",
-                "created_by": USER_ID,
-                "is_published": False,
-                "created_at": datetime.now().isoformat()
+            lesson_data = {
+                'id': str(uuid.uuid4()),
+                'lesson_number': lesson_metadata['lesson_number'],
+                'title': lesson_metadata['title'],
+                'description': lesson_metadata['description'],
+                'level': lesson_metadata['level'],
+                'audio_url': audio_url,
+                'is_published': False,
+                'created_by': USER_ID,
+                'created_at': datetime.now().isoformat(),
+                'updated_at': datetime.now().isoformat()
             }
             
-            logger.info("Saving lesson to database...")
-            lesson_response = supabase.table('lessons').insert(lesson_record).execute()
-            lesson_id = lesson_response.data[0]['id']
-            logger.info(f"✓ Lesson saved with ID: {lesson_id}")
+            # Insert lesson
+            result = supabase.table('lessons').insert(lesson_data).execute()
+            lesson_id = result.data[0]['id']
+            
+            logger.info(f"Lesson saved with ID: {lesson_id}")
             
             # Save line timings to lesson_transcript table
             logger.info(f"Saving {len(line_timings)} line timings to lesson_transcript table...")
             
-            transcript_records = []
-            for i, timing in enumerate(line_timings):
-                transcript_records.append({
+            line_records = []
+            for line_index, line_timing in enumerate(line_timings):
+                line_records.append({
                     'id': str(uuid.uuid4()),
                     'lesson_id': lesson_id,
-                    'speaker': timing['speaker'],
-                    'text_content': timing['line_text'],
-                    'line_number': i + 1,
-                    'start_time': timing['start_time'],
-                    'end_time': timing['end_time'],
+                    'line_index': line_index,
+                    'speaker': line_timing['speaker'],
+                    'text': line_timing['text'],
+                    'start_time': line_timing['start_time'],
+                    'end_time': line_timing['end_time'],
                     'created_at': datetime.now().isoformat()
                 })
             
             # Insert in batches
             batch_size = 100
-            for i in range(0, len(transcript_records), batch_size):
-                batch = transcript_records[i:i + batch_size]
+            for i in range(0, len(line_records), batch_size):
+                batch = line_records[i:i + batch_size]
                 supabase.table('lesson_transcript').insert(batch).execute()
                 logger.info(f"  ✓ Batch {i//batch_size + 1} saved")
             
@@ -584,6 +683,138 @@ class AudioProcessor:
             logger.error(f"Failed to save to database: {e}")
             raise
 
+    # ========================================
+    # VOCABULARY PROCESSING METHODS (RESTORED)
+    # ========================================
+
+    def parse_vocabulary_csv(self, file_content: str) -> List[Dict]:
+        """Parse vocabulary CSV file
+        
+        Expected format:
+        hungarian_word,english_translation,difficulty
+        asztal,table,beginner
+        víz,water,beginner
+        """
+        try:
+            vocabulary = []
+            
+            # Standardize formatting
+            file_content = self.standardize_script_formatting(file_content)
+            
+            # Parse CSV
+            csv_reader = csv.DictReader(io.StringIO(file_content))
+            
+            for row in csv_reader:
+                if not row.get('hungarian_word') or not row.get('english_translation'):
+                    logger.warning(f"Skipping incomplete vocabulary row: {row}")
+                    continue
+                
+                vocabulary.append({
+                    'hungarian_word': row['hungarian_word'].strip(),
+                    'english_translation': row['english_translation'].strip(),
+                    'difficulty': row.get('difficulty', 'beginner').strip()
+                })
+            
+            logger.info(f"Parsed {len(vocabulary)} vocabulary words")
+            return vocabulary
+            
+        except Exception as e:
+            logger.error(f"Failed to parse vocabulary CSV: {e}")
+            raise
+
+    def generate_vocabulary_audio(self, hungarian_word: str) -> bytes:
+        """Generate audio for a single vocabulary word using Hungarian voice"""
+        try:
+            # Use Aggie's voice for vocabulary (consistent female Hungarian voice)
+            voice_config = VOICE_CONFIG["Aggie"]
+            
+            # Apply pronunciation fixes
+            corrected_word = self.apply_pronunciation_fixes(hungarian_word)
+            
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_config['voice_id']}"
+            
+            headers = {
+                "Accept": "audio/mpeg",
+                "Content-Type": "application/json",
+                "xi-api-key": ELEVENLABS_API_KEY
+            }
+            
+            data = {
+                "text": corrected_word,
+                "model_id": "eleven_multilingual_v2",  # Better for Hungarian
+                "voice_settings": {
+                    "stability": voice_config['stability'],
+                    "similarity_boost": voice_config['similarity_boost'],
+                    "style": voice_config.get('style', 0),
+                    "use_speaker_boost": True
+                }
+            }
+            
+            response = requests.post(url, json=data, headers=headers, timeout=30)
+            
+            if response.status_code != 200:
+                raise Exception(f"ElevenLabs API error: {response.status_code}")
+            
+            logger.info(f"Generated audio for vocabulary word: {hungarian_word}")
+            return response.content
+            
+        except Exception as e:
+            logger.error(f"Failed to generate vocabulary audio for '{hungarian_word}': {e}")
+            raise
+
+    def create_vocabulary_filename(self, hungarian_word: str) -> str:
+        """Create a clean filename from Hungarian word"""
+        # Remove special characters and normalize
+        clean_word = unicodedata.normalize('NFKD', hungarian_word)
+        clean_word = re.sub(r'[^\w\s-]', '', clean_word).strip().lower()
+        clean_word = re.sub(r'[-\s]+', '_', clean_word)
+        
+        return f"{clean_word}.mp3"
+
+    def get_lesson_id_by_number(self, lesson_number: int) -> Optional[str]:
+        """Retrieve lesson ID from database by lesson number"""
+        try:
+            response = supabase.table('lessons').select('id').eq('lesson_number', lesson_number).execute()
+            
+            if response.data and len(response.data) > 0:
+                return response.data[0]['id']
+            else:
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to retrieve lesson ID for lesson {lesson_number}: {e}")
+            return None
+
+    def update_vocabulary_database(self, lesson_id: str, vocabulary_data: List[Dict]) -> None:
+        """Save vocabulary words to database"""
+        try:
+            logger.info(f"Saving {len(vocabulary_data)} vocabulary words to database...")
+            
+            vocab_records = []
+            for vocab in vocabulary_data:
+                vocab_records.append({
+                    'id': str(uuid.uuid4()),
+                    'lesson_id': lesson_id,
+                    'word_hu': vocab['word_hu'],
+                    'word_en': vocab['word_en'],
+                    'difficulty': vocab['difficulty'],
+                    'audio_file_path': vocab['audio_file_path'],
+                    'created_at': datetime.now().isoformat()
+                })
+            
+            # Insert all vocabulary words
+            supabase.table('lesson_vocabulary').insert(vocab_records).execute()
+            
+            logger.info(f"Successfully saved {len(vocab_records)} vocabulary words")
+            
+        except Exception as e:
+            logger.error(f"Failed to update vocabulary database: {e}")
+            raise
+
+    # ========================================
+    # END VOCABULARY METHODS
+    # ========================================
+
     def cleanup_temp_files(self):
         """Clean up temporary directory"""
         try:
@@ -597,7 +828,7 @@ processor = AudioProcessor()
 
 @app.route('/webhook/google-drive', methods=['POST'])
 def webhook_google_drive():
-    """Webhook endpoint for Google Apps Script to trigger lesson processing"""
+    """Webhook endpoint for Google Apps Script to trigger lesson or vocabulary processing"""
     try:
         logger.info("="*80)
         logger.info("WEBHOOK CALLED FROM GOOGLE APPS SCRIPT")
@@ -607,7 +838,7 @@ def webhook_google_drive():
         data = request.get_json()
         file_name = data.get('fileName')
         file_content = data.get('fileContent')
-        file_type = data.get('fileType', 'lesson')
+        file_type = data.get('fileType', 'lesson')  # Default to 'lesson' for backwards compatibility
         timestamp = data.get('timestamp')
         
         logger.info(f"Received file: {file_name}")
@@ -622,13 +853,33 @@ def webhook_google_drive():
                 "message": "Missing fileName or fileContent"
             }), 400
         
+        # Route to appropriate processor based on file_type
+        if file_type == 'vocabulary':
+            return process_vocabulary_file(file_name, file_content)
+        else:  # Default to lesson processing
+            return process_lesson_file(file_name, file_content)
+        
+    except Exception as e:
+        logger.error("="*80)
+        logger.error(f"WEBHOOK ERROR: {e}")
+        logger.error("="*80)
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        return jsonify({
+            "status": "error",
+            "success": False,
+            "message": str(e)
+        }), 500
+
+def process_lesson_file(file_name: str, file_content: str) -> tuple:
+    """Process lesson file from webhook"""
+    try:
         # Extract lesson metadata from filename
-        # Expected format: "Lesson 4 - in the restaurant - FINAL.txt"
         lesson_number = None
         title = "Untitled Lesson"
         
         # Try to parse lesson number and title from filename
-        import re
         lesson_match = re.search(r'lesson\s*(\d+)', file_name, re.IGNORECASE)
         if lesson_match:
             lesson_number = int(lesson_match.group(1))
@@ -700,18 +951,110 @@ def webhook_google_drive():
             "audio_url": audio_url,
             "duration_seconds": result['duration_seconds'],
             "line_count": len(result['line_timings']),
-            "word_count": len(result['word_timings']),  # NEW
+            "word_count": len(result['word_timings']),
             "line_timings_saved": True,
-            "word_timings_saved": len(result['word_timings']) > 0  # NEW
+            "word_timings_saved": len(result['word_timings']) > 0
         })
         
     except Exception as e:
-        logger.error("="*80)
-        logger.error(f"WEBHOOK ERROR: {e}")
-        logger.error("="*80)
+        logger.error(f"Failed to process lesson file: {e}")
         import traceback
         logger.error(traceback.format_exc())
+        return jsonify({
+            "status": "error",
+            "success": False,
+            "message": str(e)
+        }), 500
+
+def process_vocabulary_file(file_name: str, file_content: str) -> tuple:
+    """Process vocabulary CSV file from webhook
+    
+    Expected filename format: "Lesson 4 - Vocabulary.csv"
+    CSV format: hungarian_word,english_translation,difficulty
+    """
+    try:
+        logger.info(f"Processing vocabulary file: {file_name}")
         
+        # Parse vocabulary CSV
+        vocabulary_data = processor.parse_vocabulary_csv(file_content)
+        if not vocabulary_data:
+            raise Exception("No vocabulary data found in file")
+        
+        # Extract lesson number from filename
+        lesson_match = re.search(r'lesson\s*(\d+)', file_name, re.IGNORECASE)
+        if not lesson_match:
+            raise Exception(f"Could not extract lesson number from vocabulary filename: {file_name}")
+        
+        lesson_number = int(lesson_match.group(1))
+        logger.info(f"Vocabulary for lesson number: {lesson_number}")
+        
+        # Get lesson ID from database
+        lesson_id = processor.get_lesson_id_by_number(lesson_number)
+        if not lesson_id:
+            raise Exception(f"No lesson found in database for lesson number {lesson_number}. Please upload the lesson script first.")
+        
+        logger.info(f"Found lesson ID: {lesson_id}")
+        
+        # Process each vocabulary word
+        processed_vocabulary = []
+        for vocab_item in vocabulary_data:
+            hungarian_word = vocab_item['hungarian_word']
+            
+            try:
+                # Generate audio for vocabulary word
+                audio_data = processor.generate_vocabulary_audio(hungarian_word)
+                
+                # Validate audio
+                if len(audio_data) < 500:
+                    logger.warning(f"Audio validation failed for word: {hungarian_word}")
+                    continue
+                
+                # Create filename
+                audio_filename = processor.create_vocabulary_filename(hungarian_word)
+                
+                # Upload to Supabase Storage
+                vocab_uuid = str(uuid.uuid4())
+                file_path = f"vocabulary/lesson_{lesson_number}/{vocab_uuid}_{audio_filename}"
+                
+                processor.upload_to_supabase_storage(file_path, audio_data, "audio/mpeg")
+                
+                processed_vocabulary.append({
+                    "word_hu": vocab_item['hungarian_word'],
+                    "word_en": vocab_item['english_translation'],
+                    "difficulty": vocab_item['difficulty'],
+                    "audio_file_path": file_path
+                })
+                
+                logger.info(f"Processed vocabulary word: {hungarian_word}")
+                
+            except Exception as e:
+                logger.error(f"Failed to process vocabulary word '{hungarian_word}': {e}")
+                continue
+        
+        if not processed_vocabulary:
+            raise Exception("No vocabulary words were successfully processed")
+        
+        # Save to database
+        processor.update_vocabulary_database(lesson_id, processed_vocabulary)
+        
+        logger.info("="*80)
+        logger.info(f"VOCABULARY SUCCESS: {len(processed_vocabulary)} words for Lesson {lesson_number}")
+        logger.info("="*80)
+        
+        return jsonify({
+            "status": "success",
+            "success": True,
+            "message": f"Successfully processed {len(processed_vocabulary)} vocabulary words for Lesson {lesson_number}",
+            "lesson_id": lesson_id,
+            "lesson_number": lesson_number,
+            "vocabulary_count": len(processed_vocabulary),
+            "words_processed": [v['word_hu'] for v in processed_vocabulary]
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to process vocabulary file: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return jsonify({
             "status": "error",
             "success": False,
@@ -778,9 +1121,9 @@ def process_lesson_endpoint():
             "audio_url": audio_url,
             "duration_seconds": result['duration_seconds'],
             "line_count": len(result['line_timings']),
-            "word_count": len(result['word_timings']),  # NEW
+            "word_count": len(result['word_timings']),
             "line_timings_saved": True,
-            "word_timings_saved": len(result['word_timings']) > 0  # NEW
+            "word_timings_saved": len(result['word_timings']) > 0
         })
         
     except Exception as e:
@@ -789,297 +1132,6 @@ def process_lesson_endpoint():
             "status": "error",
             "message": str(e)
         }), 500
-
-def map_google_speakers_to_lesson_speakers(lesson_id: str, word_timings: List[Dict]) -> List[Dict]:
-    """Map Google's speaker tags to actual lesson speakers using lesson_transcript timing
-    
-    Strategy:
-    1. Get lesson_transcript data with speaker labels and time ranges
-    2. For each word, find which lesson_transcript segment it falls into
-    3. Assign that segment's speaker to the word
-    
-    Args:
-        lesson_id: UUID of the lesson
-        word_timings: List of word timing dicts with speaker_tag from Google
-        
-    Returns:
-        Updated word_timings list with 'speaker' field added
-    """
-    try:
-        # Fetch lesson transcript with speaker info
-        transcript_response = supabase.table('lesson_transcript').select('*').eq('lesson_id', lesson_id).order('start_time').execute()
-        transcript_segments = transcript_response.data
-        
-        if not transcript_segments:
-            logger.warning("No transcript segments found for mapping - using Google speaker tags")
-            # Fallback: Use Google's speaker tags
-            for word in word_timings:
-                word['speaker'] = f"Speaker {word.get('speaker_tag', 'Unknown')}"
-            return word_timings
-        
-        logger.info(f"Mapping {len(word_timings)} words to {len(transcript_segments)} transcript segments")
-        
-        # Map each word to a transcript segment based on timing overlap
-        for word in word_timings:
-            word_start = word['start_time']
-            word_end = word['end_time']
-            word_mid = (word_start + word_end) / 2  # Use midpoint for matching
-            
-            # Find best matching segment
-            best_match = None
-            best_overlap = 0
-            
-            for segment in transcript_segments:
-                seg_start = float(segment['start_time'])
-                seg_end = float(segment['end_time'])
-                
-                # Check if word midpoint falls within segment
-                if seg_start <= word_mid <= seg_end:
-                    best_match = segment
-                    break
-                
-                # Calculate overlap as fallback
-                overlap_start = max(word_start, seg_start)
-                overlap_end = min(word_end, seg_end)
-                overlap = max(0, overlap_end - overlap_start)
-                
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_match = segment
-            
-            # Assign speaker from best matching segment
-            if best_match:
-                word['speaker'] = best_match['speaker']
-            else:
-                word['speaker'] = f"Speaker {word.get('speaker_tag', 'Unknown')}"
-                logger.debug(f"No match for word '{word['word_text']}' at {word_start:.2f}s")
-        
-        # Log speaker distribution
-        speaker_counts = {}
-        for word in word_timings:
-            speaker = word['speaker']
-            speaker_counts[speaker] = speaker_counts.get(speaker, 0) + 1
-        
-        logger.info("Speaker mapping complete:")
-        for speaker, count in speaker_counts.items():
-            logger.info(f"  {speaker}: {count} words")
-        
-        return word_timings
-        
-    except Exception as e:
-        logger.error(f"Error mapping speakers: {e}")
-        # Fallback: Use Google speaker tags
-        for word in word_timings:
-            word['speaker'] = f"Speaker {word.get('speaker_tag', 'Unknown')}"
-        return word_timings
-
-@app.route('/generate-transcript', methods=['POST'])
-def generate_transcript():
-    """
-    LEGACY ENDPOINT: Generate word-level transcript from FULL lesson audio using Google Speech-to-Text
-    
-    NOTE: This endpoint is now DEPRECATED in favor of inline word-level timestamp generation
-    during audio processing (which provides better speaker labeling and doesn't create runon paragraphs).
-    
-    This endpoint is kept for backwards compatibility and can still be used to regenerate
-    transcripts for lessons that were processed before word-level timestamps were added.
-    """
-    
-    # Check if Google Cloud is configured
-    if not GOOGLE_CLOUD_AVAILABLE:
-        return jsonify({
-            "status": "error",
-            "message": "Google Cloud libraries not installed. Install with: pip install google-cloud-speech google-cloud-storage"
-        }), 500
-    
-    if not GOOGLE_CLOUD_PROJECT_ID or not GOOGLE_APPLICATION_CREDENTIALS_JSON:
-        return jsonify({
-            "status": "error",
-            "message": "Google Cloud credentials not configured. Set GOOGLE_CLOUD_PROJECT_ID and GOOGLE_APPLICATION_CREDENTIALS_JSON environment variables."
-        }), 500
-    
-    try:
-        # Get lesson_id from request
-        data = request.get_json()
-        lesson_id = data.get('lesson_id')
-        
-        if not lesson_id:
-            return jsonify({"status": "error", "message": "lesson_id is required"}), 400
-        
-        # Fetch lesson data
-        logger.info(f"Fetching lesson data for: {lesson_id}")
-        lesson_response = supabase.table('lessons').select('*').eq('id', lesson_id).execute()
-        
-        if not lesson_response.data:
-            return jsonify({"status": "error", "message": "Lesson not found"}), 404
-        
-        lesson = lesson_response.data[0]
-        lesson_title = lesson.get('title', 'Unknown')
-        audio_file_path = lesson.get('audio_file_path')
-        
-        if not audio_file_path:
-            return jsonify({"status": "error", "message": "Lesson has no audio file"}), 400
-        
-        logger.info(f"Processing lesson: {lesson_title}")
-        logger.info(f"Audio URL: {audio_file_path}")
-        
-        # Download audio from Supabase Storage
-        logger.info("Downloading audio from Supabase Storage...")
-        audio_response = requests.get(audio_file_path)
-        audio_response.raise_for_status()
-        audio_content = audio_response.content
-        logger.info(f"Audio downloaded: {len(audio_content)} bytes")
-        
-        # Initialize Google Cloud credentials
-        logger.info("Initializing Google Cloud credentials...")
-        credentials_json = json.loads(GOOGLE_APPLICATION_CREDENTIALS_JSON)
-        credentials = service_account.Credentials.from_service_account_info(credentials_json)
-        
-        # Upload audio to Google Cloud Storage (required for long audio files)
-        logger.info("Uploading audio to Google Cloud Storage...")
-        storage_client = storage.Client(credentials=credentials, project=GOOGLE_CLOUD_PROJECT_ID)
-        bucket = storage_client.bucket(GOOGLE_CLOUD_STORAGE_BUCKET)
-        
-        # Create unique filename for temporary storage
-        temp_filename = f"temp_audio_{lesson_id}_{datetime.now().timestamp()}.mp3"
-        blob = bucket.blob(temp_filename)
-        
-        logger.info(f"Uploading audio to GCS bucket: {GOOGLE_CLOUD_STORAGE_BUCKET}/{temp_filename}")
-        blob.upload_from_string(audio_content, content_type='audio/mpeg')
-        
-        # Construct GCS URI
-        gcs_uri = f"gs://{GOOGLE_CLOUD_STORAGE_BUCKET}/{temp_filename}"
-        logger.info(f"Audio uploaded to: {gcs_uri}")
-        
-        # Initialize Speech-to-Text client
-        speech_client = speech.SpeechClient(credentials=credentials)
-        
-        # Prepare audio for Google API using GCS URI
-        audio = speech.RecognitionAudio(uri=gcs_uri)
-        
-        # Configure recognition with speaker diarization
-        config = speech.RecognitionConfig(
-            encoding=speech.RecognitionConfig.AudioEncoding.MP3,
-            sample_rate_hertz=48000,
-            language_code="hu-HU",  # Primary language
-            alternative_language_codes=["en-US"],  # For narrator's English
-            enable_word_time_offsets=True,
-            enable_automatic_punctuation=True,
-            model="latest_long",
-            # Enable speaker diarization (this is the key addition)
-            diarization_config=speech.SpeakerDiarizationConfig(
-                enable_speaker_diarization=True,
-                min_speaker_count=2,
-                max_speaker_count=3,
-            )
-        )
-        
-        logger.info("Sending audio to Google Cloud Speech-to-Text API...")
-        logger.info("Configuration: Multi-language + Speaker diarization enabled")
-        logger.info("This may take 3-5 minutes for a typical lesson...")
-        
-        # Use long_running_recognize for files longer than 1 minute
-        operation = speech_client.long_running_recognize(config=config, audio=audio)
-        response = operation.result(timeout=600)
-        
-        # Delete temporary audio file from GCS
-        logger.info("Deleting temporary audio from GCS...")
-        blob.delete()
-        logger.info("Temporary audio deleted")
-        
-        # Extract word-level timestamps with speaker tags and language codes
-        word_timings = []
-        word_index = 0
-        
-        for result in response.results:
-            alternative = result.alternatives[0]
-            
-            # Extract detected language for this result
-            detected_language = getattr(result, 'language_code', 'unknown')
-            
-            for word_info in alternative.words:
-                start_time = word_info.start_time.total_seconds()
-                end_time = word_info.end_time.total_seconds()
-                
-                # FIX: Identical timestamps (Google bug for very short words)
-                if start_time == end_time:
-                    end_time = start_time + 0.01
-                    logger.debug(f"Fixed identical timestamp for word: {word_info.word}")
-                
-                # Extract speaker tag from Google (if diarization enabled)
-                speaker_tag = getattr(word_info, 'speaker_tag', None)
-                
-                word_timings.append({
-                    "word_index": word_index,
-                    "word_text": word_info.word,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "speaker_tag": speaker_tag,
-                    "language_code": detected_language
-                })
-                word_index += 1
-        
-        logger.info(f"Successfully extracted {len(word_timings)} words from Google API")
-        
-        # Map Google speakers to lesson speakers using lesson_transcript
-        logger.info("Mapping Google speaker tags to lesson speakers...")
-        word_timings = map_google_speakers_to_lesson_speakers(lesson_id, word_timings)
-        
-        # Save to database with speaker information
-        logger.info("Saving transcript with speaker labels to dialogue_word_timings table...")
-        
-        # Delete existing transcript for this lesson (if re-generating)
-        try:
-            supabase.table('dialogue_word_timings').delete().eq('lesson_id', lesson_id).execute()
-            logger.info("Cleared existing transcript data")
-        except Exception as e:
-            logger.warning(f"No existing transcript to clear: {e}")
-        
-        # Prepare records for batch insert
-        db_records = []
-        for word_timing in word_timings:
-            db_records.append({
-                'id': str(uuid.uuid4()),
-                'lesson_id': lesson_id,
-                'word_index': word_timing['word_index'],
-                'word_text': word_timing['word_text'],
-                'start_time': word_timing['start_time'],
-                'end_time': word_timing['end_time'],
-                'speaker': word_timing.get('speaker', 'Unknown'),
-                'created_at': datetime.now().isoformat()
-            })
-        
-        # Insert in batches (Supabase has limits on batch size)
-        batch_size = 100
-        for i in range(0, len(db_records), batch_size):
-            batch = db_records[i:i + batch_size]
-            supabase.table('dialogue_word_timings').insert(batch).execute()
-            logger.info(f"Inserted batch {i//batch_size + 1}/{(len(db_records) + batch_size - 1)//batch_size}")
-        
-        logger.info(f"Successfully saved {len(word_timings)} words with speaker labels to database")
-        
-        return jsonify({
-            "status": "success",
-            "message": f"Generated and saved transcript with {len(word_timings)} words",
-            "word_count": len(word_timings),
-            "lesson_id": lesson_id,
-            "lesson_title": lesson_title,
-            "saved_to_database": True,
-            "note": "This endpoint is deprecated. New lessons automatically generate word-level timestamps during audio processing."
-        })
-        
-    except Exception as e:
-        logger.error(f"Failed to generate transcript: {e}")
-        
-        # Attempt to clean up temporary file if it exists
-        try:
-            if 'blob' in locals() and blob.exists():
-                blob.delete()
-                logger.info("Cleaned up temporary audio file after error")
-        except Exception as cleanup_error:
-            logger.warning(f"Failed to cleanup temporary file: {cleanup_error}")
-        
-        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -1093,13 +1145,14 @@ def health_check():
             "max_daily_lessons": processor.max_daily_lessons,
             "google_cloud_configured": bool(GOOGLE_CLOUD_PROJECT_ID and GOOGLE_APPLICATION_CREDENTIALS_JSON),
             "google_cloud_storage_bucket": GOOGLE_CLOUD_STORAGE_BUCKET,
-            "word_level_timestamps_enabled": bool(google_speech_client and google_storage_client)
+            "word_level_timestamps_enabled": bool(google_speech_client and google_storage_client),
+            "vocabulary_processing_enabled": True  # NEW: Confirm vocabulary support
         }
         
         return jsonify({
             "status": "healthy", 
             "config": config_status,
-            "message": "GetTalkin Audio Processor with inline word-level timestamp generation"
+            "message": "GetTalkin Audio Processor with lesson and vocabulary processing"
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -1133,7 +1186,8 @@ def add_pronunciation_fix():
 
 if __name__ == '__main__':
     try:
-        logger.info("Starting GetTalkin Audio Processor with inline word-level timestamp generation")
+        logger.info("Starting GetTalkin Audio Processor")
+        logger.info("Features: Lesson processing + Vocabulary processing + Word-level timestamps")
         logger.info("All secrets loaded from environment variables")
         app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=False)
     finally:
