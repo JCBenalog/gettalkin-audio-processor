@@ -633,9 +633,9 @@ class AudioProcessor:
                 line_records.append({
                     'id': str(uuid.uuid4()),
                     'lesson_id': lesson_id,
-                    'line_index': line_index,
+                    'line_number': line_index,
                     'speaker': line_timing['speaker'],
-                    'text': line_timing['text'],
+                    'text_content': line_timing['text'],
                     'start_time': line_timing['start_time'],
                     'end_time': line_timing['end_time'],
                     'created_at': datetime.now().isoformat()
@@ -722,11 +722,19 @@ class AudioProcessor:
             logger.error(f"Failed to parse vocabulary CSV: {e}")
             raise
 
-    def generate_vocabulary_audio(self, hungarian_word: str) -> bytes:
-        """Generate audio for a single vocabulary word using Hungarian voice"""
+    def generate_vocabulary_audio(self, hungarian_word: str, word_index: int = 0) -> bytes:
+        """Generate audio for a single vocabulary word using Hungarian voice
+        
+        Args:
+            hungarian_word: The Hungarian word to generate audio for
+            word_index: Index of word in list (used to alternate voices)
+        """
         try:
-            # Use Aggie's voice for vocabulary (consistent female Hungarian voice)
-            voice_config = VOICE_CONFIG["Aggie"]
+            # Alternate between Aggie (even) and Balasz (odd)
+            speaker = "Aggie" if word_index % 2 == 0 else "Balasz"
+            voice_config = VOICE_CONFIG[speaker]
+            
+            logger.info(f"Using {speaker}'s voice for word #{word_index + 1}: {hungarian_word}")
             
             # Apply pronunciation fixes
             corrected_word = self.apply_pronunciation_fixes(hungarian_word)
@@ -741,7 +749,8 @@ class AudioProcessor:
             
             data = {
                 "text": corrected_word,
-                "model_id": "eleven_multilingual_v2",  # Better for Hungarian
+                "model_id": "eleven_turbo_v2_5",  # Faster turbo model
+                "language_code": "hu",  # Hungarian language code for proper pronunciation
                 "voice_settings": {
                     "stability": voice_config['stability'],
                     "similarity_boost": voice_config['similarity_boost'],
@@ -755,7 +764,7 @@ class AudioProcessor:
             if response.status_code != 200:
                 raise Exception(f"ElevenLabs API error: {response.status_code}")
             
-            logger.info(f"Generated audio for vocabulary word: {hungarian_word}")
+            logger.info(f"Generated audio for vocabulary word: {hungarian_word} ({speaker})")
             return response.content
             
         except Exception as e:
@@ -997,12 +1006,12 @@ def process_vocabulary_file(file_name: str, file_content: str) -> tuple:
         
         # Process each vocabulary word
         processed_vocabulary = []
-        for vocab_item in vocabulary_data:
+        for word_index, vocab_item in enumerate(vocabulary_data):
             hungarian_word = vocab_item['hungarian_word']
             
             try:
-                # Generate audio for vocabulary word
-                audio_data = processor.generate_vocabulary_audio(hungarian_word)
+                # Generate audio for vocabulary word (alternates between Aggie and Balasz)
+                audio_data = processor.generate_vocabulary_audio(hungarian_word, word_index)
                 
                 # Validate audio
                 if len(audio_data) < 500:
