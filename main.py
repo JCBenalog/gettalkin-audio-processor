@@ -633,9 +633,9 @@ class AudioProcessor:
                 line_records.append({
                     'id': str(uuid.uuid4()),
                     'lesson_id': lesson_id,
-                    'line_index': line_index,
+                    'line_number': line_index,
                     'speaker': line_timing['speaker'],
-                    'text': line_timing['text'],
+                    'text_content': line_timing['text'],
                     'start_time': line_timing['start_time'],
                     'end_time': line_timing['end_time'],
                     'created_at': datetime.now().isoformat()
