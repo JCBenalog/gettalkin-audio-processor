@@ -91,6 +91,9 @@ except ValueError as e:
     raise
 
 # Voice Configuration
+# All voices use eleven_turbo_v2_5 model
+# - NARRATOR: English (default language)
+# - Balasz & Aggie: Hungarian (explicit language_code: "hu")
 VOICE_CONFIG = {
     "NARRATOR": {
         "voice_id": "L0Dsvb3SLTyegXwtm47J",
@@ -216,7 +219,7 @@ class AudioProcessor:
         """Clean only formatting issues that break parsing, preserve text integrity"""
         
         # Normalize quote variants (curly to straight)
-        quote_variants = ['"', '"', '"', '„', '‟']
+        quote_variants = ['"', '"', '"', 'â€ž', 'â€Ÿ']
         for variant in quote_variants:
             file_content = file_content.replace(variant, '"')
         
@@ -304,13 +307,13 @@ class AudioProcessor:
             if not voice_config:
                 raise Exception(f"Unknown speaker: {speaker}")
             
-            # Select model based on language
+            # Always use turbo v2.5 model with explicit language codes
+            model_id = "eleven_turbo_v2_5"
+            
             if language_hint == "hu":
-                model_id = "eleven_multilingual_v2"  # Better for Hungarian
-                logger.info(f"Using multilingual model for Hungarian speaker: {speaker}")
+                logger.info(f"Using turbo v2.5 with Hungarian language code for speaker: {speaker}")
             else:
-                model_id = "eleven_turbo_v2_5"  # Faster for English narrator
-                logger.info(f"Using turbo model for English narrator")
+                logger.info(f"Using turbo v2.5 for English narrator")
             
             url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_config['voice_id']}"
             
@@ -330,6 +333,10 @@ class AudioProcessor:
                     "use_speaker_boost": True
                 }
             }
+            
+            # Add language code for Hungarian speakers
+            if language_hint == "hu":
+                data["language_code"] = "hu"
             
             response = requests.post(url, json=data, headers=headers, timeout=30)
             
@@ -633,9 +640,9 @@ class AudioProcessor:
                 line_records.append({
                     'id': str(uuid.uuid4()),
                     'lesson_id': lesson_id,
-                    'line_number': line_index,
+                    'line_index': line_index,
                     'speaker': line_timing['speaker'],
-                    'text_content': line_timing['text'],
+                    'text': line_timing['text'],
                     'start_time': line_timing['start_time'],
                     'end_time': line_timing['end_time'],
                     'created_at': datetime.now().isoformat()
@@ -646,9 +653,9 @@ class AudioProcessor:
             for i in range(0, len(line_records), batch_size):
                 batch = line_records[i:i + batch_size]
                 supabase.table('lesson_transcript').insert(batch).execute()
-                logger.info(f"  ✓ Batch {i//batch_size + 1} saved")
+                logger.info(f"  âœ“ Batch {i//batch_size + 1} saved")
             
-            logger.info(f"✓ All {len(line_timings)} line timings saved to lesson_transcript")
+            logger.info(f"âœ“ All {len(line_timings)} line timings saved to lesson_transcript")
             
             # NEW: Save word timings to dialogue_word_timings table
             if word_timings:
@@ -671,11 +678,11 @@ class AudioProcessor:
                 for i in range(0, len(word_records), batch_size):
                     batch = word_records[i:i + batch_size]
                     supabase.table('dialogue_word_timings').insert(batch).execute()
-                    logger.info(f"  ✓ Word batch {i//batch_size + 1} saved")
+                    logger.info(f"  âœ“ Word batch {i//batch_size + 1} saved")
                 
-                logger.info(f"✓ All {len(word_timings)} word timings saved to dialogue_word_timings")
+                logger.info(f"âœ“ All {len(word_timings)} word timings saved to dialogue_word_timings")
             else:
-                logger.info("⚠ No word timings to save (Google Cloud may not be configured)")
+                logger.info("âš  No word timings to save (Google Cloud may not be configured)")
             
             return lesson_id
             
@@ -693,7 +700,7 @@ class AudioProcessor:
         Expected format:
         hungarian_word,english_translation,difficulty
         asztal,table,beginner
-        víz,water,beginner
+        vÃ­z,water,beginner
         """
         try:
             vocabulary = []
@@ -901,13 +908,13 @@ def process_lesson_file(file_name: str, file_content: str) -> tuple:
             }), 400
         
         # Extract title (everything between lesson number and file extension)
-        title_match = re.search(r'lesson\s*\d+\s*[-–]\s*(.+?)(?:\s*-\s*FINAL)?\.(?:txt|csv|docx)$', file_name, re.IGNORECASE)
+        title_match = re.search(r'lesson\s*\d+\s*[-â€“]\s*(.+?)(?:\s*-\s*FINAL)?\.(?:txt|csv|docx)$', file_name, re.IGNORECASE)
         if title_match:
             title = title_match.group(1).strip()
             logger.info(f"Extracted title: {title}")
         else:
             # Fallback: use filename without extension
-            title = file_name.rsplit('.', 1)[0].replace(f'Lesson {lesson_number}', '').strip(' -–')
+            title = file_name.rsplit('.', 1)[0].replace(f'Lesson {lesson_number}', '').strip(' -â€“')
             logger.info(f"Using fallback title: {title}")
         
         # Rate limiting
